@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""
+Document Manager - Manage document collections with pluggable backends
+
+A flexible script that manages document collections with support for multiple backends:
+- RAG (default): Uses LlamaIndex + Chroma for local RAG
+- OpenAI: Uses OpenAI's file search tool and vector stores (with --openai-tools flag)
+
+Features:
+- Multiple backend support (RAG, OpenAI)
+- Document upload and indexing
+- Query capabilities
+- Collection management
+"""
+
+import argparse
+import logging
+import sys
+
+from dotenv import load_dotenv
+from document_store_factory import create_document_store, OPENAI_BACKEND, RAG_BACKEND
+from openai_document_store import OpenAIDocumentStore
+from config import (
+    config, add_common_arguments, parse_model_from_args,
+    DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY
+)
+
+# Load environment variables
+load_dotenv()
+
+# Constants
+DEFAULT_COLLECTION = "collection"
+
+
+def main():
+    """Main function for the Document Manager."""
+    parser = argparse.ArgumentParser(
+        description="Document Manager - Manage document collections (uses RAG backend by default)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Update documents for default collection (uses RAG backend)
+  python document_manager.py --update
+  
+  # Update documents for specific collection (RAG backend)
+  python document_manager.py --collection "my_docs" --update
+  python document_manager.py --collections "my_docs" --update  # Both work!
+  
+  # Query documents in default collection (RAG backend)
+  python document_manager.py --query "What are the main products?"
+  
+  # Query documents in specific collection
+  python document_manager.py --collection "my_docs" --query "What are the main products?"
+  
+  # Use OpenAI backend instead of RAG
+  python document_manager.py --openai-tools --collection "my_docs" --update
+  python document_manager.py --openai-tools --query "What are the main products?"
+  
+  # List all collections (OpenAI backend only)
+  python document_manager.py --openai-tools --list-collections
+  
+  # Show document store info for a collection
+  python document_manager.py --collection "my_docs" --info
+  
+  # Delete all documents in a collection
+  python document_manager.py --collection "my_docs" --delete
+        """
+    )
+    
+    parser.add_argument(
+        "--collection", "--collections",
+        dest="collection",
+        default=DEFAULT_COLLECTION, 
+        help=f"Collection name (folder in data/documents/) (default: '{DEFAULT_COLLECTION}')"
+    )
+    
+    parser.add_argument(
+        "--openai-tools",
+        action="store_true",
+        help="Use OpenAI backend instead of RAG (default: RAG backend)"
+    )
+    
+    # Add common configuration arguments
+    add_common_arguments(parser, include_concurrent=False, include_timeout=False, include_similarity=False, include_embedding_model=True)
+    
+    # Actions
+    parser.add_argument("--update", action="store_true", help="Update documents for the collection")
+    parser.add_argument("--query", help="Query the collection's documents")
+    parser.add_argument("--list-collections", action="store_true", help="List all collections with document stores")
+    parser.add_argument("--info", action="store_true", help="Show information about the collection (or enable verbose logging when combined with --update)")
+    parser.add_argument("--delete", action="store_true", help="Delete all documents for the collection")
+    
+    # Query options (for RAG backend)
+    parser.add_argument("--chunks", action="store_true", help="Show retrieved chunks preview (RAG backend only)")
+    parser.add_argument("--store-md", action="store_true", help="Store markdown outputs from LlamaParse in data/rag/markdowns/ (RAG backend only)")
+    parser.add_argument("--no-llama-parse", action="store_true", help="Use classical LlamaIndex parsing instead of LlamaParse (RAG backend only)")
+    
+    args = parser.parse_args()
+    
+    # Determine backend based on --openai-tools flag
+    backend = OPENAI_BACKEND if args.openai_tools else RAG_BACKEND
+    
+    # Configure logging based on --info flag
+    if args.info:
+        # Show INFO level logs (API calls, HTTP requests, etc.)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    else:
+        # Only show WARNING and above (suppress INFO and DEBUG)
+        logging.basicConfig(
+            level=logging.WARNING,
+            format='%(levelname)s: %(message)s'
+        )
+        # Suppress specific noisy loggers
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("openai").setLevel(logging.WARNING)
+        logging.getLogger("chromadb").setLevel(logging.WARNING)
+        logging.getLogger("llama_index").setLevel(logging.WARNING)
+    
+    # Parse model configuration from arguments
+    try:
+        model, reasoning_effort, text_verbosity = parse_model_from_args(args)
+    except Exception as e:
+        print(f"❌ Error parsing model configuration: {e}")
+        sys.exit(1)
+    
+    # Handle list-collections separately (needs to list all, not just one collection)
+    if args.list_collections:
+        if backend == OPENAI_BACKEND:
+            collections = OpenAIDocumentStore.list_all_collections()
+            if collections:
+                print(f"📋 Collections with document stores (OpenAI backend):")
+                for collection in collections:
+                    # Create temporary store to get info
+                    store = create_document_store(
+                        backend=backend,
+                        collection=collection,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        text_verbosity=text_verbosity,
+                        embedding_model=args.embedding_model
+                    )
+                    info = store.get_info()
+                    doc_count = info.get("total_documents", 0) if info else 0
+                    print(f"  - {collection} ({doc_count} documents)")
+            else:
+                print(f"📋 No collections with document stores found (OpenAI backend)")
+        else:
+            # RAG backend - read state files directly without initializing stores
+            from rag_client import RAGDocumentStore
+            from pathlib import Path
+            import json
+            
+            collections = RAGDocumentStore.list_all_collections()
+            if collections:
+                print(f"📋 Collections with document stores (RAG backend):")
+                for collection in collections:
+                    # Read state file directly to get document count
+                    state_file = Path("data/rag/chroma_stores") / collection / "rag_state.json"
+                    doc_count = 0
+                    try:
+                        if state_file.exists():
+                            with open(state_file, 'r', encoding='utf-8') as f:
+                                state = json.load(f)
+                                doc_count = state.get("total_documents", 0)
+                    except Exception:
+                        pass
+                    print(f"  - {collection} ({doc_count} documents)")
+            else:
+                print(f"📋 No collections with document stores found (RAG backend)")
+        return
+    
+    # Initialize the document store using factory
+    try:
+        backend_name = "OpenAI" if backend == OPENAI_BACKEND else "RAG"
+        
+        # Show which API provider is being used
+        import os
+        azure_base_url = os.getenv("AZURE_OPENAI_BASE_URL")
+        if backend == RAG_BACKEND and azure_base_url:
+            provider_info = " (Azure OpenAI)"
+        else:
+            provider_info = ""
+        
+        print(f"🔧 Using {backend_name} backend{provider_info} for collection '{args.collection}'")
+        store = create_document_store(
+            backend=backend,
+            collection=args.collection,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            text_verbosity=text_verbosity,
+            embedding_model=args.embedding_model,
+            store_md=args.store_md,
+            use_llama_parse=(not args.no_llama_parse)
+        )
+    except Exception as e:
+        print(f"❌ Error initializing document store: {e}")
+        sys.exit(1)
+    
+    # Execute requested action
+    # If --info is specified without other actions, show info and exit
+    if args.info and not any([args.update, args.query, args.delete]):
+        info = store.get_info()
+        if info:
+            backend_name = "OpenAI" if backend == OPENAI_BACKEND else "RAG"
+            print(f"📊 Document store info for collection '{args.collection}':")
+            print(f"  Backend: {backend_name}")
+            print(f"  Total documents: {info.get('total_documents', 0)}")
+            print(f"  Last Updated: {info.get('last_updated', 'Never')}")
+            if 'vector_store_id' in info:
+                print(f"  Vector Store ID: {info.get('vector_store_id')}")
+            if 'storage_dir' in info:
+                print(f"  Storage Directory: {info.get('storage_dir')}")
+        else:
+            print(f"❌ No document store found for collection '{args.collection}'")
+        return
+    
+    if args.delete:
+        print(f"🗑️  Deleting documents for collection '{args.collection}'...")
+        success = store.delete_documents()
+        if success:
+            print(f"✅ Successfully deleted documents for collection '{args.collection}'")
+        else:
+            print(f"❌ Failed to delete documents for collection '{args.collection}'")
+            sys.exit(1)
+        return
+    
+    if args.update:
+        success = store.update_documents()
+        if not success:
+            print(f"❌ Update failed for collection '{args.collection}'")
+            sys.exit(1)
+    
+    if args.query:
+        # Pass show_chunks parameter for RAG backend
+        response = store.query_documents(args.query, show_chunks=args.chunks)
+        if response:
+            print(f"\n📝 Response:\n{response}")
+        else:
+            print("❌ Query failed")
+            sys.exit(1)
+    
+    if not any([args.update, args.query, args.info, args.list_collections, args.delete]):
+        print("❌ No action specified. Use --help for available options.")
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

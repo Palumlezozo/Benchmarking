@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+ENV/
+env/
+.venv
+
+# Poetry
+poetry.lock
+
+# IDEs
+.idea/
+.vscode/
+*.code-workspace
+.cursor/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Documents (but keep directory structure with .gitkeep)
+data/documents/**/*
+!data/documents/**/.gitkeep
+
+# RAG data (but keep directory structure with .gitkeep)
+data/rag/chroma_stores/**/*
+data/rag/markdowns/**/*
+data/rag/*.json
+!data/rag/**/.gitkeep
+
+# Exports
+*.xlsx
+*.csv
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
