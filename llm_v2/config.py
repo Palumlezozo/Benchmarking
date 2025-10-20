@@ -77,6 +77,9 @@ class Config:
     USE_COHERE_RERANK: bool = True  # Use Cohere rerank if API key available
     COHERE_RERANK_MODEL: str = "rerank-english-v3.0"  # Cohere rerank model
     COHERE_RERANK_TOP_N: int = 6  # Number of chunks to keep after reranking
+    
+    # Tool Calling Configuration
+    MAX_TOOL_ITERATIONS: int = 4  # Maximum number of tool-calling iterations in the reasoning loop
 
 # Global configuration instance
 config = Config()
@@ -366,6 +369,7 @@ DEFAULT_TOP_K = config.DEFAULT_TOP_K
 USE_COHERE_RERANK = config.USE_COHERE_RERANK
 COHERE_RERANK_MODEL = config.COHERE_RERANK_MODEL
 COHERE_RERANK_TOP_N = config.COHERE_RERANK_TOP_N
+MAX_TOOL_ITERATIONS = config.MAX_TOOL_ITERATIONS
 SUPPORTED_MODELS = config.SUPPORTED_MODELS
 SUPPORTED_EMBEDDING_MODELS = config.SUPPORTED_EMBEDDING_MODELS
 

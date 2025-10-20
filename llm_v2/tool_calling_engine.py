@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from tool_base import Tool, ToolResult
-from config import DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY
+from config import DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY, MAX_TOOL_ITERATIONS
 
 
 class ToolCall(BaseModel):
@@ -43,7 +43,7 @@ class ToolCallingEngine:
         model: str = DEFAULT_MODEL,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         text_verbosity: str = DEFAULT_TEXT_VERBOSITY,
-        max_tool_iterations: int = 3
+        max_tool_iterations: int = MAX_TOOL_ITERATIONS
     ):
         """
         Initialize the tool-calling engine.
@@ -53,7 +53,7 @@ class ToolCallingEngine:
             model: OpenAI model to use
             reasoning_effort: Reasoning effort level
             text_verbosity: Text verbosity level
-            max_tool_iterations: Maximum number of tool-calling iterations
+            max_tool_iterations: Maximum number of tool-calling iterations (default from config)
         """
         self.tools = {tool.name(): tool for tool in tools}
         self.model = model
