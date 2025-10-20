@@ -83,6 +83,7 @@ OPENAI_API_KEY=your_openai_api_key_here
 # Optional but recommended
 TAVILY_API_KEY=your_tavily_api_key_here        # For web search
 LLAMA_CLOUD_API_KEY=your_llama_cloud_api_key  # For LlamaParse
+LLAMA_CLOUD_BASE_URL=https://api.cloud.llamaindex.ai  # Optional: European endpoint
 COHERE_API_KEY=your_cohere_api_key            # For reranking
 
 ```
@@ -384,6 +385,7 @@ TAVILY_API_KEY=tvly-...            # Tavily API key for web search
 
 # Optional - Document Parsing
 LLAMA_CLOUD_API_KEY=llx-...        # LlamaParse API key for better parsing
+LLAMA_CLOUD_BASE_URL=https://api.cloud.llamaindex.ai  # Optional: for European or custom endpoints
 
 # Optional - Reranking
 COHERE_API_KEY=...                 # Cohere API key for result reranking
@@ -554,12 +556,19 @@ data/documents/
 For best results with PDFs containing tables, charts, or complex layouts:
 
 1. Get API key from https://cloud.llamaindex.ai/
-2. Add to `.env`: `LLAMA_CLOUD_API_KEY=llx-...`
+2. Add to `.env`:
+   ```bash
+   LLAMA_CLOUD_API_KEY=llx-...
+   # Optional: Use European endpoint for GDPR compliance
+   LLAMA_CLOUD_BASE_URL=https://api.cloud.llamaindex.ai
+   ```
 3. LlamaParse automatically extracts:
    - Tables as markdown
    - Page numbers for citations
    - Text from images (OCR)
    - Complex layouts
+
+**Note:** If `LLAMA_CLOUD_BASE_URL` is set, the system will use that endpoint (e.g., European endpoint for data residency requirements)
 
 #### Storing Markdown Outputs (`--store-md`)
 
@@ -653,6 +662,7 @@ Improves result quality by reranking initial retrieval:
   - Get at: https://cloud.llamaindex.ai/
   - Free tier available (1000 pages/day)
   - Significantly improves PDF/table extraction
+  - Optional: Set `LLAMA_CLOUD_BASE_URL` for European endpoint (GDPR compliance)
 
 - **Cohere** (`COHERE_API_KEY`): For result reranking
   - Get at: https://cohere.com/

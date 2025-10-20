@@ -217,24 +217,35 @@ class RAGDocumentStore(DocumentStore):
             print("⚠️  LLAMA_CLOUD_API_KEY not found, falling back to pypdf")
             return None
         
+        # Get optional base URL for European or custom endpoints
+        base_url = os.getenv("LLAMA_CLOUD_BASE_URL")
+        
         try:
-            parser = LlamaParse(
-                api_key=api_key,
-                result_type=LLAMA_PARSE_RESULT_TYPE,
-                verbose=LLAMA_PARSE_VERBOSE,
-                language=LLAMA_PARSE_LANGUAGE,
-                parse_mode=LLAMA_PARSE_PARSE_MODE,
-                invalidate_cache=LLAMA_PARSE_INVALIDATE_CACHE,
-                do_not_cache=LLAMA_PARSE_DO_NOT_CACHE,
-                num_workers=LLAMA_PARSE_NUM_WORKERS,
-                skip_diagonal_text=LLAMA_PARSE_SKIP_DIAGONAL_TEXT,
-                spreadsheet_extract_sub_tables=LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES,
-                spreadsheet_force_formula_computation=LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION,
-                page_prefix=LLAMA_PARSE_PAGE_PREFIX,
-                page_suffix=LLAMA_PARSE_PAGE_SUFFIX,
-                split_by_page=LLAMA_SPLIT_BY_PAGE
-            )
-            print(f"✅ LlamaParse enabled (result_type={LLAMA_PARSE_RESULT_TYPE}, parse_mode={LLAMA_PARSE_PARSE_MODE}, workers={LLAMA_PARSE_NUM_WORKERS})")
+            # Build parser kwargs
+            parser_kwargs = {
+                "api_key": api_key,
+                "result_type": LLAMA_PARSE_RESULT_TYPE,
+                "verbose": LLAMA_PARSE_VERBOSE,
+                "language": LLAMA_PARSE_LANGUAGE,
+                "parse_mode": LLAMA_PARSE_PARSE_MODE,
+                "invalidate_cache": LLAMA_PARSE_INVALIDATE_CACHE,
+                "do_not_cache": LLAMA_PARSE_DO_NOT_CACHE,
+                "num_workers": LLAMA_PARSE_NUM_WORKERS,
+                "skip_diagonal_text": LLAMA_PARSE_SKIP_DIAGONAL_TEXT,
+                "spreadsheet_extract_sub_tables": LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES,
+                "spreadsheet_force_formula_computation": LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION,
+                "page_prefix": LLAMA_PARSE_PAGE_PREFIX,
+                "page_suffix": LLAMA_PARSE_PAGE_SUFFIX,
+                "split_by_page": LLAMA_SPLIT_BY_PAGE
+            }
+            
+            # Add base_url if specified (for European or custom endpoints)
+            if base_url:
+                parser_kwargs["base_url"] = base_url
+            
+            parser = LlamaParse(**parser_kwargs)
+            endpoint_info = f" (endpoint: {base_url})" if base_url else ""
+            print(f"✅ LlamaParse enabled{endpoint_info} (result_type={LLAMA_PARSE_RESULT_TYPE}, parse_mode={LLAMA_PARSE_PARSE_MODE}, workers={LLAMA_PARSE_NUM_WORKERS})")
             return parser
         except Exception as e:
             print(f"⚠️  Failed to initialize LlamaParse: {e}")
@@ -286,6 +297,8 @@ class RAGDocumentStore(DocumentStore):
             "documents": {},
             "last_updated": None,
             "total_documents": 0,
+            "indexed_documents": 0,
+            "failed_documents": 0,
             "index_created": False
         }
     
@@ -323,6 +336,141 @@ class RAGDocumentStore(DocumentStore):
                     print(f"⚠️  Warning: Could not process file {file_path}: {e}")
         
         return documents
+    
+    def _get_document_status(self, file_path: str, current_metadata: Dict[str, Any]) -> str:
+        """
+        Get indexing status of a document.
+        
+        Args:
+            file_path: Path to the document
+            current_metadata: Current file metadata (size, modified, extension)
+        
+        Returns:
+            'new', 'modified', 'indexed', or 'failed'
+        """
+        stored_doc = self.state["documents"].get(file_path)
+        
+        if not stored_doc:
+            return 'new'
+        
+        # Check if file was modified
+        if stored_doc.get('modified') != current_metadata['modified']:
+            return 'modified'
+        
+        # Check if indexing failed previously
+        if not stored_doc.get('indexed', False):
+            return 'failed'
+        
+        return 'indexed'
+    
+    def _get_documents_to_process(self) -> List[Path]:
+        """
+        Get list of documents that need (re)indexing.
+        
+        Returns:
+            List of Path objects for documents that need processing
+        """
+        current_docs = self._scan_documents()
+        to_process = []
+        
+        for file_path, metadata in current_docs.items():
+            status = self._get_document_status(file_path, metadata)
+            if status in ['new', 'modified', 'failed']:
+                to_process.append((Path(file_path), status))
+        
+        return to_process
+    
+    def _get_deleted_documents(self) -> List[str]:
+        """
+        Get list of documents that were deleted from disk.
+        
+        Returns:
+            List of file paths that are in state but no longer on disk
+        """
+        current_docs = self._scan_documents()
+        stored_docs = self.state.get("documents", {})
+        
+        deleted = []
+        for file_path in stored_docs.keys():
+            if file_path not in current_docs:
+                deleted.append(file_path)
+        
+        return deleted
+    
+    def _update_state_counters(self):
+        """Update aggregate counters in state."""
+        documents = self.state.get("documents", {})
+        
+        total = len(documents)
+        indexed = sum(1 for doc in documents.values() if doc.get("indexed", False))
+        failed = sum(1 for doc in documents.values() if not doc.get("indexed", False))
+        
+        self.state["total_documents"] = total
+        self.state["indexed_documents"] = indexed
+        self.state["failed_documents"] = failed
+    
+    def _mark_document_indexed(self, doc_path: Path, chunk_count: int):
+        """
+        Mark document as successfully indexed and save state.
+        
+        Args:
+            doc_path: Path to the document
+            chunk_count: Number of chunks created from this document
+        """
+        file_path_str = str(doc_path)
+        
+        self.state["documents"][file_path_str] = {
+            "size": doc_path.stat().st_size,
+            "modified": doc_path.stat().st_mtime,
+            "extension": doc_path.suffix.lower(),
+            "indexed": True,
+            "indexed_at": dt.now().isoformat(),
+            "chunk_count": chunk_count
+        }
+        
+        # Update counters
+        self._update_state_counters()
+        
+        # Save state immediately (progressive checkpointing)
+        self._save_state()
+    
+    def _mark_document_failed(self, doc_path: Path, error: str):
+        """
+        Mark document as failed and save state.
+        
+        Args:
+            doc_path: Path to the document
+            error: Error message
+        """
+        file_path_str = str(doc_path)
+        
+        self.state["documents"][file_path_str] = {
+            "size": doc_path.stat().st_size,
+            "modified": doc_path.stat().st_mtime,
+            "extension": doc_path.suffix.lower(),
+            "indexed": False,
+            "indexed_at": None,
+            "error": error,
+            "failed_at": dt.now().isoformat()
+        }
+        
+        # Update counters
+        self._update_state_counters()
+        
+        # Save state immediately
+        self._save_state()
+    
+    def _remove_document_from_state(self, file_path: str):
+        """
+        Remove document from state (for deleted files).
+        
+        Args:
+            file_path: Path to the document (as string)
+        """
+        if file_path in self.state["documents"]:
+            del self.state["documents"][file_path]
+            self._update_state_counters()
+            self._save_state()
     
     def _needs_reindex(self) -> bool:
         """Check if the index needs to be rebuilt."""
@@ -531,15 +679,124 @@ class RAGDocumentStore(DocumentStore):
         if saved_count > 0:
             print(f"✅ Saved {saved_count} markdown file(s)")
     
+    def _load_single_document(self, doc_path: Path) -> List[Document]:
+        """
+        Load a single document using LlamaIndex.
+        
+        Args:
+            doc_path: Path to the document
+            
+        Returns:
+            List of Document objects
+        """
+        # Configure file extractor based on LlamaParse availability
+        if self.llama_parse_parser:
+            file_extractor = {
+                ".pdf": self.llama_parse_parser,
+                ".docx": self.llama_parse_parser,
+                ".doc": self.llama_parse_parser,
+                ".pptx": self.llama_parse_parser,
+                ".ppt": self.llama_parse_parser,
+                ".xlsx": self.llama_parse_parser,
+                ".xls": self.llama_parse_parser,
+                ".html": self.llama_parse_parser,
+                ".htm": self.llama_parse_parser,
+            }
+        else:
+            file_extractor = {
+                ".pdf": PDFReader(),
+            }
+        
+        reader = SimpleDirectoryReader(
+            input_files=[str(doc_path)],
+            file_extractor=file_extractor
+        )
+        
+        return reader.load_data()
+    
+    def _add_document_to_index(self, doc_path: Path, status: str) -> bool:
+        """
+        Add a single document to the existing index.
+        
+        Args:
+            doc_path: Path to the document
+            status: Document status ('new', 'modified', or 'failed')
+            
+        Returns:
+            True if successful, False if failed
+        """
+        try:
+            status_emoji = "📥" if status == "new" else "🔄" if status == "modified" else "🔁"
+            print(f"{status_emoji} Processing {doc_path.name} ({status})...")
+            
+            # Load single document
+            documents = self._load_single_document(doc_path)
+            
+            if not documents:
+                self._mark_document_failed(doc_path, "No content extracted")
+                return False
+            
+            # Save markdown if enabled
+            if self.store_md:
+                self._save_markdowns(documents)
+            
+            # Enrich with page metadata
+            if self.llama_parse_parser:
+                documents = self._enrich_documents_with_page_metadata(documents)
+            
+            # Create nodes from document
+            node_parser = SentenceSplitter(
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap
+            )
+            nodes = node_parser.get_nodes_from_documents(documents)
+            
+            # Post-process for page ranges
+            if self.llama_parse_parser:
+                nodes = self._post_process_nodes_with_page_ranges(nodes)
+            
+            # Add nodes to existing index (or create if first document)
+            if not self.index:
+                # First document - create new index
+                chroma_collection = self.chroma_client.get_or_create_collection(
+                    name=f"{self.collection}_vectors"
+                )
+                vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                
+                self.index = VectorStoreIndex(
+                    nodes,
+                    storage_context=storage_context
+                )
+                
+                self.state["index_created"] = True
+            else:
+                # Add to existing index
+                self.index.insert_nodes(nodes)
+            
+            # Update state for this document
+            self._mark_document_indexed(doc_path, len(nodes))
+            
+            print(f"✅ Indexed {doc_path.name} ({len(nodes)} chunks)")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to index {doc_path.name}: {e}")
+            import traceback
+            traceback.print_exc()
+            self._mark_document_failed(doc_path, str(e))
+            return False
+    
     def update_documents(self) -> bool:
         """
-        Update the document index.
+        Update the document index incrementally.
         
         This will:
         1. Scan the documents directory
-        2. Load documents using LlamaIndex SimpleDirectoryReader
-        3. Create/update the Chroma vector store
-        4. Build the index
+        2. Identify documents that need processing (new, modified, or failed)
+        3. Process documents one at a time with progressive state updates
+        4. Handle deletions
+        5. Resume capability: can restart after interruption
         """
         try:
             print(f"🔄 Updating RAG index for collection '{self.collection}'...")
@@ -551,107 +808,78 @@ class RAGDocumentStore(DocumentStore):
                 print(f"⚠️  No documents found in {self.documents_dir}")
                 return True
             
-            # Check if we need to reindex
-            if not self._needs_reindex():
-                print(f"✅ Index is up to date ({len(current_docs)} documents)")
+            # Load existing index if available
+            if self.state.get("index_created", False) and not self.index:
+                try:
+                    print("📖 Loading existing index...")
+                    chroma_collection = self.chroma_client.get_collection(
+                        name=f"{self.collection}_vectors"
+                    )
+                    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+                    self.index = VectorStoreIndex.from_vector_store(vector_store)
+                    print("   ✅ Existing index loaded")
+                except Exception as e:
+                    print(f"   ⚠️  Could not load existing index: {e}")
+                    print("   Will create new index")
+                    self.index = None
+            
+            # Get documents that need processing
+            to_process = self._get_documents_to_process()
+            
+            # Get deleted documents
+            deleted = self._get_deleted_documents()
+            
+            # Check if everything is up to date
+            if not to_process and not deleted:
+                indexed_count = self.state.get("indexed_documents", 0)
+                print(f"✅ Index is up to date ({indexed_count} documents indexed)")
                 return True
             
-            print(f"📥 Loading {len(current_docs)} document(s)...")
+            # Summary
+            total_work = len(to_process) + len(deleted)
+            print(f"📊 Found {len(current_docs)} total documents:")
+            if to_process:
+                new_count = sum(1 for _, status in to_process if status == 'new')
+                modified_count = sum(1 for _, status in to_process if status == 'modified')
+                failed_count = sum(1 for _, status in to_process if status == 'failed')
+                print(f"   • {new_count} new")
+                print(f"   • {modified_count} modified")
+                print(f"   • {failed_count} previously failed")
+            if deleted:
+                print(f"   • {len(deleted)} deleted")
+            print()
             
-            # Configure file extractor based on LlamaParse availability
-            if self.llama_parse_parser:
-                # Use LlamaParse for better quality parsing (supports PDF, DOCX, PPTX, etc.)
-                print("   Using LlamaParse for document parsing...")
-                file_extractor = {
-                    ".pdf": self.llama_parse_parser,
-                    ".docx": self.llama_parse_parser,
-                    ".doc": self.llama_parse_parser,
-                    ".pptx": self.llama_parse_parser,
-                    ".ppt": self.llama_parse_parser,
-                    ".xlsx": self.llama_parse_parser,
-                    ".xls": self.llama_parse_parser,
-                    ".html": self.llama_parse_parser,
-                    ".htm": self.llama_parse_parser,
-                }
-            else:
-                # Fall back to pypdf for PDFs
-                print("   Using pypdf for document parsing...")
-                file_extractor = {
-                    ".pdf": PDFReader(),
-                }
+            # Process documents one at a time
+            successful = 0
+            failed = 0
             
-            reader = SimpleDirectoryReader(
-                input_dir=str(self.documents_dir),
-                recursive=True,
-                required_exts=list({doc["extension"] for doc in current_docs.values()}),
-                file_extractor=file_extractor
-            )
-            documents = reader.load_data()
-            
-            if not documents:
-                print("⚠️  No documents could be loaded")
-                return True
-            
-            print(f"📄 Loaded {len(documents)} document(s)")
-            
-            # Save markdown files (if enabled)
-            self._save_markdowns(documents)
-            
-            # Enrich documents with page metadata from markdown (for LlamaParse)
-            if self.llama_parse_parser:
-                documents = self._enrich_documents_with_page_metadata(documents)
-            
-            # Get or create Chroma collection
-            try:
-                chroma_collection = self.chroma_client.get_or_create_collection(
-                    name=f"{self.collection}_vectors"
-                )
-            except Exception as e:
-                print(f"❌ Error creating Chroma collection: {e}")
-                return False
-            
-            # Create vector store
-            vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-            
-            # Build index with custom node post-processing
-            print(f"🔨 Building vector index (chunk_size={self.chunk_size})...")
-            
-            # Create nodes (chunks) from documents
-            node_parser = SentenceSplitter(
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap
-            )
-            nodes = node_parser.get_nodes_from_documents(documents, show_progress=True)
-            
-            # Post-process nodes to extract accurate page ranges
-            if self.llama_parse_parser:
-                print(f"📋 Extracting page ranges for {len(nodes)} chunks...")
-                nodes = self._post_process_nodes_with_page_ranges(nodes)
-                
-                # Log how many nodes have page labels
-                nodes_with_pages = sum(1 for node in nodes if 'page_label' in node.metadata)
-                if nodes_with_pages > 0:
-                    print(f"   ✅ {nodes_with_pages}/{len(nodes)} chunks have page numbers")
+            for i, (doc_path, status) in enumerate(to_process, 1):
+                print(f"[{i}/{len(to_process)}] ", end="")
+                if self._add_document_to_index(doc_path, status):
+                    successful += 1
                 else:
-                    print(f"   ⚠️  NO page_label found in any chunks after processing!")
+                    failed += 1
+                print()  # Empty line between documents
             
-            # Create index from nodes
-            self.index = VectorStoreIndex(
-                nodes,
-                storage_context=storage_context
-            )
+            # Handle deleted documents
+            for deleted_path in deleted:
+                print(f"🗑️  Removing {Path(deleted_path).name} from state...")
+                self._remove_document_from_state(deleted_path)
             
-            # Create retriever with default top_k
-            self.retriever = self.index.as_retriever(similarity_top_k=DEFAULT_TOP_K)
+            # Final summary
+            print("=" * 60)
+            print(f"✅ Index update complete!")
+            print(f"   • Successfully indexed: {successful}")
+            if failed > 0:
+                print(f"   • Failed: {failed}")
+            if deleted:
+                print(f"   • Removed: {len(deleted)}")
             
-            # Update state
-            self.state["documents"] = current_docs
-            self.state["total_documents"] = len(current_docs)
-            self.state["index_created"] = True
-            self._save_state()
+            indexed_count = self.state.get("indexed_documents", 0)
+            total_count = self.state.get("total_documents", 0)
+            print(f"   • Total in collection: {indexed_count}/{total_count} indexed")
+            print("=" * 60)
             
-            print(f"✅ Index updated: {len(current_docs)} documents indexed")
             return True
             
         except Exception as e:
