@@ -11,11 +11,15 @@ import asyncio
 import json
 import logging
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
+
+# Add parent directory to path for imports when running as script
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "llm_v2"
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -25,18 +29,25 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 
-from config import (
-    config, add_common_arguments, parse_model_from_args,
-    DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY,
-    DEFAULT_EMBEDDING_MODEL
-)
-from utils import clean_text, clean_markdown_text
+try:
+    from .config import (
+        add_common_arguments, parse_model_from_args,
+        DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY,
+        DEFAULT_EMBEDDING_MODEL
+    )
+    from .utils import clean_text, clean_markdown_text
+except ImportError:
+    from config import (
+        add_common_arguments, parse_model_from_args,
+        DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY,
+        DEFAULT_EMBEDDING_MODEL
+    )
+    from utils import clean_text, clean_markdown_text
 
 # Load environment variables
 load_dotenv()
 
 # Constants
-STATE_FILE = "data/rag/rag_state.json"
 OPENAI_STATE_FILE = "data/rag/openai_state.json"
 DEFAULT_COLLECTION = "collection"
 
@@ -99,14 +110,12 @@ class DocumentChatbot:
     
     def _load_openai_state(self):
         """Load the OpenAI collection state from the document manager for multiple collections."""
-        from pathlib import Path as PathLib
-        
         state_file = Path(OPENAI_STATE_FILE)
         
         if not state_file.exists():
             # Check if there are documents in any of the folders
             for collection in self.collections:
-                docs_dir = PathLib("data/documents") / collection
+                docs_dir = Path("data/documents") / collection
                 if docs_dir.exists():
                     docs = list(docs_dir.rglob("*"))
                     docs = [d for d in docs if d.is_file() and not d.name.startswith("._")]
@@ -128,7 +137,7 @@ class DocumentChatbot:
             for collection in self.collections:
                 if collection not in state_collections:
                     # Check if there are documents in the folder
-                    docs_dir = PathLib("data/documents") / collection
+                    docs_dir = Path("data/documents") / collection
                     if docs_dir.exists():
                         docs = list(docs_dir.rglob("*"))
                         docs = [d for d in docs if d.is_file() and not d.name.startswith("._")]
@@ -146,7 +155,7 @@ class DocumentChatbot:
                 
                 if not vector_store_id:
                     # Check if there are documents in the folder
-                    docs_dir = PathLib("data/documents") / collection
+                    docs_dir = Path("data/documents") / collection
                     if docs_dir.exists():
                         docs = list(docs_dir.rglob("*"))
                         docs = [d for d in docs if d.is_file() and not d.name.startswith("._")]
@@ -175,9 +184,14 @@ class DocumentChatbot:
     
     def _initialize_my_tools(self):
         """Initialize custom tools (RAG, web search, etc.) for multiple collections."""
-        from rag_tool import RAGSearchTool
-        from tavily_tool import TavilySearchTool, TavilyNewsSearchTool
-        from tool_calling_engine import ToolCallingEngine
+        try:
+            from .rag_tool import RAGSearchTool
+            from .tavily_tool import TavilySearchTool, TavilyNewsSearchTool
+            from .tool_calling_engine import ToolCallingEngine
+        except ImportError:
+            from rag_tool import RAGSearchTool
+            from tavily_tool import TavilySearchTool, TavilyNewsSearchTool
+            from tool_calling_engine import ToolCallingEngine
         
         try:
             tools = []
@@ -701,7 +715,10 @@ Example structure (what you should produce):
     def interactive_mode(self):
         """Run the chatbot in interactive mode."""
         collections_str = "', '".join(self.collections)
-        tools_name = "OpenAI (file_search + web_search)" if self.use_openai_tools else "RAG + Web Search (my-tools)"
+        if self.use_openai_tools:
+            tools_name = "OpenAI (file_search + web_search)"
+        else:
+            tools_name = "RAG + Web Search (my-tools)"
         self.console.print(Panel.fit(
             f"[bold]Document Collection Chatbot[/bold]\n"
             f"Collections: [cyan]'{collections_str}'[/cyan]\n"

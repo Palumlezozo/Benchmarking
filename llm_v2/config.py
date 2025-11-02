@@ -35,6 +35,11 @@ class Config:
         "text-embedding-ada-002"
     ])
     
+    # Rate Limiting Configuration
+    EMBEDDING_BATCH_SIZE: int = 20  # Chunks per embedding API call (reduce if hitting rate limits)
+    EMBEDDING_DELAY_SECONDS: float = 1  # Delay between embedding batches (increase if hitting rate limits)
+    MAX_NODES_PER_BATCH: int = 40  # Max nodes to process before waiting (helps with rate limits)
+    
     # Tavily Web Search Configuration
     DEFAULT_TAVILY_MAX_RESULTS: int = 5
     DEFAULT_TAVILY_SEARCH_DEPTH: str = "basic"  # Options: "basic", "advanced"
@@ -47,19 +52,16 @@ class Config:
     LLAMA_PARSE_RESULT_TYPE: str = "markdown"  # Options: "text", "markdown"
     LLAMA_PARSE_VERBOSE: bool = False
     LLAMA_PARSE_LANGUAGE: str = "en"  # Languages for OCR (English, French, Dutch)
-    LLAMA_PARSE_PARSE_MODE: str = "parse_page_with_llm"  # Parsing mode: "simple", "fast", "parse_page_with_llm"
-    LLAMA_PARSE_INVALIDATE_CACHE: bool = False  # Force re-parsing of cached documents (set to True to refresh)
-    LLAMA_PARSE_DO_NOT_CACHE: bool = False  # Don't cache parsing results (TEMPORARY FOR DEBUGGING)
-    LLAMA_PARSE_NUM_WORKERS: int = 10  # Number of workers for parallel processing
-    LLAMA_SPLIT_BY_PAGE: bool = False  # Required for page markers to work
-    # Advanced parsing options
-    LLAMA_PARSE_SKIP_DIAGONAL_TEXT: bool = False  # Skip diagonal text in documents
-    LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES: bool = True  # Extract sub-tables from spreadsheets
-    LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION: bool = True  # Force formula computation in spreadsheets
-    # Page markers as markdown comments (will be extracted and removed during indexing)
-    LLAMA_PARSE_PAGE_PREFIX: str = "<!-- PAGE_START: {pageNumber} -->\n"
-    LLAMA_PARSE_PAGE_SUFFIX: str = "\n<!-- PAGE_END: {pageNumber} -->"
-    
+    LLAMA_PARSE_PARSE_MODE: str = "parse_page_with_llm"
+    LLAMA_PARSE_INVALIDATE_CACHE: bool = True  # Force re-parsing of cached documents (set to True to refresh)
+    LLAMA_PARSE_DO_NOT_CACHE: bool = True  # Don't cache parsing results (TEMPORARY FOR DEBUGGING)
+    LLAMA_PARSE_NUM_WORKERS: int = 12  # Number of workers for parallel processing
+    # Advanced parsing options -> disabled if without_llm 
+    LLAMA_PARSE_SKIP_DIAGONAL_TEXT: bool = False
+    LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES: bool = False  # Extract sub-tables from spreadsheets
+    LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION: bool = False  # Force formula computation in spreadsheets
+    # Large document partitioning (but then, we can't do batch processing)
+    LLAMA_PARSE_PARTITION_PAGES: Optional[int] = None  # Number of pages per partition for large documents (None = no partitioning)
     
     # Processing Configuration
     DEFAULT_MAX_CONCURRENT: int = 15
@@ -360,6 +362,9 @@ DEFAULT_MODEL_HIGH = config.DEFAULT_MODEL_HIGH
 DEFAULT_REASONING_EFFORT_HIGH = config.DEFAULT_REASONING_EFFORT_HIGH
 DEFAULT_TEXT_VERBOSITY_HIGH = config.DEFAULT_TEXT_VERBOSITY_HIGH
 DEFAULT_EMBEDDING_MODEL = config.DEFAULT_EMBEDDING_MODEL
+EMBEDDING_BATCH_SIZE = config.EMBEDDING_BATCH_SIZE
+EMBEDDING_DELAY_SECONDS = config.EMBEDDING_DELAY_SECONDS
+MAX_NODES_PER_BATCH = config.MAX_NODES_PER_BATCH
 DEFAULT_MAX_CONCURRENT = config.DEFAULT_MAX_CONCURRENT
 DEFAULT_TIMEOUT = config.DEFAULT_TIMEOUT
 DEFAULT_SIMILARITY_THRESHOLD = config.DEFAULT_SIMILARITY_THRESHOLD
@@ -392,6 +397,4 @@ LLAMA_PARSE_NUM_WORKERS = config.LLAMA_PARSE_NUM_WORKERS
 LLAMA_PARSE_SKIP_DIAGONAL_TEXT = config.LLAMA_PARSE_SKIP_DIAGONAL_TEXT
 LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES = config.LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES
 LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION = config.LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION
-LLAMA_PARSE_PAGE_PREFIX = config.LLAMA_PARSE_PAGE_PREFIX
-LLAMA_PARSE_PAGE_SUFFIX = config.LLAMA_PARSE_PAGE_SUFFIX
-LLAMA_SPLIT_BY_PAGE = config.LLAMA_SPLIT_BY_PAGE
+LLAMA_PARSE_PARTITION_PAGES = config.LLAMA_PARSE_PARTITION_PAGES

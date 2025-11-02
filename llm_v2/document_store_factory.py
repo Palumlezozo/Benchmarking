@@ -6,7 +6,7 @@ implementation based on the specified backend type.
 """
 
 from typing import Literal
-from document_store_base import DocumentStore
+from .document_store_base import DocumentStore
 
 # Backend types
 OPENAI_BACKEND = "openai"
@@ -37,7 +37,7 @@ def create_document_store(
         # Create OpenAI document store
         store = create_document_store("openai", "my_collection", model="gpt-5-mini")
         
-        # Create RAG document store
+        # Create RAG document store (with LlamaParse)
         store = create_document_store("rag", "my_collection", embedding_model="text-embedding-3-small")
     """
     if backend not in SUPPORTED_BACKENDS:
@@ -47,13 +47,13 @@ def create_document_store(
         )
     
     if backend == OPENAI_BACKEND:
-        from openai_document_store import OpenAIDocumentStore
+        from .openai_document_store import OpenAIDocumentStore
         # Filter out RAG-specific parameters for OpenAI backend (it doesn't use them)
         openai_kwargs = {k: v for k, v in kwargs.items() if k not in ['embedding_model', 'store_md', 'use_llama_parse']}
         return OpenAIDocumentStore(collection=collection, **openai_kwargs)
     
     elif backend == RAG_BACKEND:
-        from rag_client import RAGDocumentStore
+        from .rag_client import RAGDocumentStore
         return RAGDocumentStore(collection=collection, **kwargs)
     
     else:

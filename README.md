@@ -5,7 +5,7 @@ A powerful, flexible document Q&A system that combines multiple document search 
 ## 🌟 Key Features
 
 ### Multi-Backend Support
-- **RAG Backend (Default)**: Local vector search using LlamaIndex + ChromaDB with Azure OpenAI
+- **RAG Backend (Default)**: Local vector search using LlamaIndex + ChromaDB with Azure OpenAI or standard OpenAI
 - **OpenAI Backend**: Cloud-based using OpenAI's native file_search tool (use `--openai-tools` flag)
 - **Hybrid Approach**: Combine document search with real-time web search
 - **Flexible API**: Auto-detects Azure OpenAI or falls back to standard OpenAI
@@ -73,11 +73,11 @@ pip install -r requirements.txt
 Create a `.env` file in the project root:
 
 ```bash
-# Azure OpenAI (used for RAG backend - default)
+# Azure OpenAI (used for RAG backend - default, recommended)
 AZURE_OPENAI_API_KEY=your_azure_api_key_here
 AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/v1/
 
-# Standard OpenAI (used for --openai-tools backend)
+# Standard OpenAI (used for --openai-tools backend or as fallback)
 OPENAI_API_KEY=your_openai_api_key_here
 
 # Optional but recommended
@@ -95,6 +95,13 @@ mkdir -p data/rag/chroma_stores
 ```
 
 ## ⚡ Quick Start
+
+> **Note:** Scripts can be run in two ways:
+> - **Recommended:** `poetry run python -m llm_v2.chatbot` (as module)
+> - **Alternative:** `poetry run python llm_v2/chatbot.py` (direct script)
+> 
+> Both methods work identically for `chatbot.py`, `document_manager.py`, and `azure_document_manager.py`.  
+> The module method (`-m`) is recommended but not required.
 
 ### 1. Add Documents
 
@@ -117,9 +124,12 @@ data/documents/
 
 **Using RAG Backend (default, uses Azure OpenAI if configured):**
 ```bash
+# Direct script (both --collection and --collections work):
 python llm_v2/document_manager.py --collection financials --update
-# Or explicitly:
-python llm_v2/document_manager.py --collections financials --update  # Both work!
+python llm_v2/document_manager.py --collections financials --update
+
+# Or as module:
+poetry run python -m llm_v2.document_manager --collection financials --update
 ```
 
 **Using OpenAI Backend (with native file_search):**
@@ -131,26 +141,31 @@ python llm_v2/document_manager.py --openai-tools --collection financials --updat
 
 **Interactive mode (RAG backend with Azure OpenAI):**
 ```bash
-python llm_v2/chatbot.py --collection financials
+# Recommended (as module):
+poetry run python -m llm_v2.chatbot --collection financials
+
+# Alternative (direct script):
+poetry run python llm_v2/chatbot.py --collection financials
+
 # Or use --collections alias:
-python llm_v2/chatbot.py --collections financials
+poetry run python -m llm_v2.chatbot --collections financials
 ```
 
 **Query multiple collections:**
 ```bash
-python llm_v2/chatbot.py --collection "financials,operations,collection"
+poetry run python -m llm_v2.chatbot --collection "financials,operations,collection"
 # Or:
-python llm_v2/chatbot.py --collections "financials,operations,collection"
+poetry run python -m llm_v2.chatbot --collections "financials,operations,collection"
 ```
 
 **Single query:**
 ```bash
-python llm_v2/chatbot.py --collection financials --query "What were the key metrics in 2023?"
+poetry run python -m llm_v2.chatbot --collection financials --query "What were the key metrics in 2023?"
 ```
 
 **Using OpenAI native tools (file_search + web_search):**
 ```bash
-python llm_v2/chatbot.py --openai-tools --collection financials
+poetry run python -m llm_v2.chatbot --openai-tools --collection financials
 ```
 
 ## ☁️ Azure OpenAI Integration
@@ -208,39 +223,43 @@ This verifies:
 ### System Components
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Chatbot                               │
-│  ┌──────────────────┐           ┌──────────────────┐       │
-│  │   OpenAI Tools   │           │    My-Tools      │       │
-│  │  - file_search   │           │  - RAG Search    │       │
-│  │  - web_search    │           │  - Tavily Web    │       │
-│  └──────────────────┘           │  - Tavily News   │       │
-│                                  └──────────────────┘       │
-└─────────────────────────────────────────────────────────────┘
-                    │                           │
-                    ▼                           ▼
-    ┌───────────────────────┐   ┌──────────────────────────┐
-    │  OpenAI Vector Store  │   │   RAG Document Store     │
-    │  - Cloud-based        │   │   - LlamaIndex           │
-    │  - Managed by OpenAI  │   │   - ChromaDB             │
-    └───────────────────────┘   │   - Cohere Rerank        │
-                                │   - LlamaParse           │
-                                └──────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                             Chatbot                                 │
+│  ┌──────────────┐                    ┌──────────────────┐        │
+│  │ OpenAI Tools │                    │    My-Tools      │        │
+│  │ - file_search│                    │  - RAG Search    │        │
+│  │ - web_search │                    │  - Tavily Web    │        │
+│  └──────────────┘                    │  - Tavily News   │        │
+│                                       └──────────────────┘        │
+└────────────────────────────────────────────────────────────────────┘
+           │                                    │
+           ▼                                    ▼
+┌─────────────────┐                ┌────────────────────┐
+│OpenAI Vector    │                │ RAG Document Store │
+│Store            │                │ - LlamaIndex       │
+│- Cloud-based    │                │ - ChromaDB         │
+│- Managed by     │                │ - Cohere Rerank    │
+│  OpenAI         │                │ - LlamaParse       │
+│                 │                │ - Azure OpenAI     │
+└─────────────────┘                │   or OpenAI        │
+                                   └────────────────────┘
 ```
 
 ### Backend Comparison
 
-| Feature | RAG Backend (Default) | OpenAI Backend (`--openai-tools`) |
+| Feature | RAG Backend (Default) | OpenAI Backend |
 |---------|-------------|----------------|
-| **API Provider** | Azure OpenAI (configurable) | Standard OpenAI |
+| **API Provider** | Azure OpenAI or Standard OpenAI | Standard OpenAI |
 | **Storage** | Local (ChromaDB) | Cloud (OpenAI) |
-| **Privacy** | ✅ Full control | ⚠️ Data sent to OpenAI |
+| **Privacy** | ✅ Full control (local storage) | ⚠️ Data sent to OpenAI |
 | **Cost** | Lower (embeddings only) | Higher (storage + search) |
-| **Performance** | Fast (local) | Depends on API |
+| **Performance** | Fast (local vector search) | Depends on API |
 | **Reranking** | ✅ Cohere supported | ❌ Not available |
-| **Multi-collection** | ✅ Separate tools per collection | ✅ Multiple vector stores |
+| **Multi-collection** | ✅ Separate tools | ✅ Multiple stores |
 | **Page tracking** | ✅ Via LlamaParse | ✅ Native support |
 | **Web Search** | ✅ Tavily integration | ✅ OpenAI web_search |
+| **Scalability** | Limited (local storage) | High (cloud-based) |
+| **Large Documents** | ✅ Partitioning support | ⚠️ Limited by API |
 
 ## 📚 Scripts Overview
 
@@ -251,7 +270,7 @@ The main interface for querying documents. Supports both interactive and single-
 
 **Key Features:**
 - Multiple collection support (use `--collection` or `--collections`)
-- Two backends: RAG (default, uses Azure OpenAI) or OpenAI native tools (`--openai-tools`)
+- Two backends: RAG (default) or OpenAI native tools (`--openai-tools`)
 - Conversation history
 - Markdown table detection and Excel export
 - Structured responses (content, sources, insights)
@@ -259,33 +278,35 @@ The main interface for querying documents. Supports both interactive and single-
 **Usage:**
 ```bash
 # Interactive mode (RAG + Azure OpenAI)
-python llm_v2/chatbot.py --collection "docs1,docs2"
-python llm_v2/chatbot.py --collections "docs1,docs2"  # Both work!
+poetry run python -m llm_v2.chatbot --collection "docs1,docs2"
+poetry run python -m llm_v2.chatbot --collections "docs1,docs2"  # Both work!
 
 # OpenAI native tools
-python llm_v2/chatbot.py --openai-tools --collection docs
+poetry run python -m llm_v2.chatbot --openai-tools --collection docs
 
 # Single query
-python llm_v2/chatbot.py --query "What is X?" --collection docs
+poetry run python -m llm_v2.chatbot --query "What is X?" --collection docs
 
 # With specific model
-python llm_v2/chatbot.py --model gpt-5 --reasoning-effort high
+poetry run python -m llm_v2.chatbot --model gpt-5 --reasoning-effort high
 
 # Light mode (fast and cheap)
-python llm_v2/chatbot.py --light
+poetry run python -m llm_v2.chatbot --light
 
 # Debug mode
-python llm_v2/chatbot.py --info
+poetry run python -m llm_v2.chatbot --info
 ```
 
 #### `document_manager.py` - Document Indexing & Management
 Manages document collections: upload, index, query, delete.
 
 **Key Features:**
-- Backend selection: RAG (default, uses Azure OpenAI) or OpenAI native (`--openai-tools`)
-- Document indexing
+- Backend selection: RAG (default) or OpenAI native (`--openai-tools`)
+- Document indexing with LlamaParse (high-quality parsing)
+- Large document support with partitioning (`partition_pages` config)
 - Collection management (use `--collection` or `--collections`)
 - Direct querying (for testing)
+- Markdown storage from LlamaParse outputs (`--store-md`)
 
 **Usage:**
 ```bash
@@ -313,8 +334,9 @@ python llm_v2/document_manager.py --collection docs --delete
 
 # List all collections
 python llm_v2/document_manager.py --list-collections
-python llm_v2/document_manager.py --openai-tools --list-collections  # For OpenAI backend
+python llm_v2/document_manager.py --openai-tools --list-collections  # OpenAI backend
 ```
+
 
 ### Supporting Modules
 
@@ -412,8 +434,9 @@ COHERE_RERANK_TOP_N=6             # Final count after reranking
 ```python
 USE_LLAMA_PARSE = True
 LLAMA_PARSE_PARSE_MODE = "parse_page_with_llm"  # Quality mode
-LLAMA_PARSE_NUM_WORKERS = 10                     # Parallel processing
-LLAMA_PARSE_INVALIDATE_CACHE = False             # Force re-parse
+LLAMA_PARSE_NUM_WORKERS = 12                     # Parallel processing
+LLAMA_PARSE_INVALIDATE_CACHE = True              # Force re-parse
+LLAMA_PARSE_PARTITION_PAGES = 100                # Pages per partition for large docs (None = disable)
 ```
 
 **Tavily Settings:**
@@ -441,7 +464,7 @@ python llm_v2/document_manager.py --collection reports --update
 
 **2. Chat with the collection:**
 ```bash
-python llm_v2/chatbot.py --collection reports
+poetry run python -m llm_v2.chatbot --collection reports
 ```
 
 **3. Ask a question:**
@@ -453,35 +476,35 @@ You> What were the revenue figures for Q4?
 
 **Query across multiple years:**
 ```bash
-python llm_v2/chatbot.py --collection "2022_reports,2023_reports,2024_reports" \
+poetry run python -m llm_v2.chatbot --collection "2022_reports,2023_reports,2024_reports" \
   --query "Compare revenue growth across all years"
 ```
 
 **Query different document types:**
 ```bash
-python llm_v2/chatbot.py --collection "financials,operations,compliance"
+poetry run python -m llm_v2.chatbot --collection "financials,operations,compliance"
 ```
 
 ### Advanced Querying
 
 **High-quality mode:**
 ```bash
-python llm_v2/chatbot.py --model gpt-5 --reasoning-effort high --collection reports
+poetry run python -m llm_v2.chatbot --model gpt-5 --reasoning-effort high --collection reports
 ```
 
 **Fast/economical mode:**
 ```bash
-python llm_v2/chatbot.py --light --collection reports
+poetry run python -m llm_v2.chatbot --light --collection reports
 ```
 
 **With OpenAI native tools:**
 ```bash
-python llm_v2/chatbot.py --openai-tools --collection reports
+poetry run python -m llm_v2.chatbot --openai-tools --collection reports
 ```
 
 **Debug mode (show API calls):**
 ```bash
-python llm_v2/chatbot.py --info --collection reports --query "What is X?"
+poetry run python -m llm_v2.chatbot --info --collection reports --query "What is X?"
 ```
 
 ### Table Extraction
@@ -587,6 +610,25 @@ python llm_v2/document_manager.py --collection docs --update --store-md
 
 Markdown files are saved with the same name as the source document (e.g., `report.pdf` → `report.md`)
 
+#### Large Document Partitioning
+
+For very large documents (e.g., annual reports with 500+ pages), enable partitioning to split documents into smaller chunks for processing:
+
+**Configuration in `config.py`:**
+```python
+LLAMA_PARSE_PARTITION_PAGES = 100  # Number of pages per partition (None = disable)
+```
+
+**How it works:**
+- Documents larger than the partition size are split into multiple partitions
+- Each partition is processed separately and combined automatically
+- Results are merged into a single document with correct page numbering (`<!-- PAGE: N -->`)
+- Improves processing reliability for very large documents
+- Automatically handles multiple JobResults per file
+
+**Example:**
+A 250-page document with `partition_pages=100` will be split into 3 partitions (pages 1-100, 101-200, 201-250), processed separately, then combined with correct page markers.
+
 #### Classical Parsing Mode (`--no-llama-parse`)
 
 Bypass LlamaParse and use standard LlamaIndex document readers:
@@ -643,6 +685,7 @@ Improves result quality by reranking initial retrieval:
   - `AZURE_OPENAI_BASE_URL`: Your Azure endpoint (e.g., `https://your-resource.openai.azure.com/openai/v1/`)
   - Get at: https://portal.azure.com/
   - Used by default for RAG backend (document processing, embeddings, responses)
+  - Also required for Azure AI Search backend (for embeddings)
   
 - **Standard OpenAI** (Required for `--openai-tools`)
   - `OPENAI_API_KEY`: Your OpenAI API key
@@ -650,6 +693,7 @@ Improves result quality by reranking initial retrieval:
   - Required when using `--openai-tools` flag
   - Fallback for RAG backend if Azure not configured
   - Cost: Pay per use (embeddings + completions)
+
 
 ### Recommended Optional
 
@@ -753,7 +797,7 @@ export PYTHONPATH=/path/to/llm-v2:$PYTHONPATH
 
 3. **Reduce workers:**
    ```python
-   LLAMA_PARSE_NUM_WORKERS = 4  # Reduced from 10
+   LLAMA_PARSE_NUM_WORKERS = 4  # Reduced from 12 (default)
    ```
 
 ## 📁 Project Structure
@@ -762,7 +806,7 @@ export PYTHONPATH=/path/to/llm-v2:$PYTHONPATH
 llm-v2/
 ├── llm_v2/                          # Main package
 │   ├── chatbot.py                   # Interactive Q&A interface
-│   ├── document_manager.py          # Document indexing CLI
+│   ├── document_manager.py          # Document indexing CLI (unified interface)
 │   ├── config.py                    # Centralized configuration
 │   ├── rag_client.py                # RAG implementation (LlamaIndex + ChromaDB)
 │   ├── openai_document_store.py     # OpenAI vector store implementation
@@ -773,6 +817,9 @@ llm-v2/
 │   ├── document_store_base.py       # Document store interface
 │   ├── document_store_factory.py    # Factory for creating stores
 │   └── utils.py                     # Utility functions
+├── archive/                          # Archived scripts (Azure AI Search)
+│   ├── azure_document_store.py      # (Archived)
+│   └── azure_indexer_document_store.py  # (Archived)
 ├── data/
 │   ├── documents/                   # Document collections (organized by folder)
 │   │   ├── collection/              # Default collection
@@ -798,12 +845,12 @@ llm-v2/
 1. Organize Documents
    └─> Place PDFs/docs in data/documents/<collection_name>/
 
-2. Index Collection (RAG backend with Azure OpenAI)
-   └─> python document_manager.py --collection <name> --update
+2. Index Collection (RAG backend with Azure OpenAI or OpenAI)
+   └─> python llm_v2/document_manager.py --collection <name> --update
 
 3. Query Documents
-   ├─> Interactive: python chatbot.py --collection <name>
-   └─> Single query: python chatbot.py --collection <name> --query "..."
+   ├─> Interactive: poetry run python -m llm_v2.chatbot --collection <name>
+   └─> Single query: poetry run python -m llm_v2.chatbot --collection <name> --query "..."
 
 4. (Optional) Update Index
    └─> Re-run step 2 when documents change
@@ -817,13 +864,13 @@ llm-v2/
    ├─> data/documents/2024_reports/
    └─> data/documents/forecasts/
 
-2. Index Each Collection (RAG backend with Azure OpenAI)
-   ├─> python document_manager.py --collection 2023_reports --update
-   ├─> python document_manager.py --collection 2024_reports --update
-   └─> python document_manager.py --collection forecasts --update
+2. Index Each Collection (RAG backend with Azure OpenAI or OpenAI)
+   ├─> python llm_v2/document_manager.py --collection 2023_reports --update
+   ├─> python llm_v2/document_manager.py --collection 2024_reports --update
+   └─> python llm_v2/document_manager.py --collection forecasts --update
 
 3. Query Multiple Collections
-   └─> python chatbot.py --collection "2023_reports,2024_reports,forecasts"
+   └─> poetry run python -m llm_v2.chatbot --collection "2023_reports,2024_reports,forecasts"
 ```
 
 ## 📊 Performance Tips
@@ -831,7 +878,7 @@ llm-v2/
 ### For Best Quality
 ```bash
 # Use GPT-5 with high reasoning
-python llm_v2/chatbot.py \
+poetry run python -m llm_v2.chatbot \
   --model gpt-5 \
   --reasoning-effort high \
   --collection docs
@@ -845,10 +892,10 @@ TAVILY_API_KEY=...       # Web search
 ### For Best Speed
 ```bash
 # Use light mode
-python llm_v2/chatbot.py --light --collection docs
+poetry run python -m llm_v2.chatbot --light --collection docs
 
 # Or manually specify
-python llm_v2/chatbot.py \
+poetry run python -m llm_v2.chatbot \
   --model gpt-5-nano \
   --reasoning-effort low \
   --collection docs
@@ -860,7 +907,7 @@ python llm_v2/chatbot.py \
 python llm_v2/document_manager.py --update
 
 # Use nano model
-python llm_v2/chatbot.py --model gpt-5-nano
+poetry run python -m llm_v2.chatbot --model gpt-5-nano
 
 # Disable reranking
 # Edit config.py: USE_COHERE_RERANK = False
@@ -887,6 +934,15 @@ For questions or issues:
 
 ---
 
-**Version:** 0.1.0
-**Last Updated:** October 20, 2025  
+**Version:** 0.2.0
+**Last Updated:** January 2025  
 **Python:** 3.12+
+
+## 📝 Recent Changes
+
+### Version 0.2.0
+- ✅ Removed Azure AI Search backend (moved to `archive/` folder)
+- ✅ Simplified to two backends: RAG (default) and OpenAI (`--openai-tools`)
+- ✅ Enhanced LlamaParse support with partitioning for large documents
+- ✅ Improved batch processing with proper JobResult handling
+- ✅ Updated document processing pipeline with page marker reconstruction

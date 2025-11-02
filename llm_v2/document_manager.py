@@ -3,27 +3,43 @@
 Document Manager - Manage document collections with pluggable backends
 
 A flexible script that manages document collections with support for multiple backends:
-- RAG (default): Uses LlamaIndex + Chroma for local RAG
+- RAG (default): Uses LlamaIndex + Chroma for local RAG with LlamaParse
 - OpenAI: Uses OpenAI's file search tool and vector stores (with --openai-tools flag)
 
 Features:
 - Multiple backend support (RAG, OpenAI)
 - Document upload and indexing
-- Query capabilities
+- Query capabilities with semantic search
 - Collection management
 """
 
 import argparse
 import logging
 import sys
+import time
+from pathlib import Path
+
+# Add parent directory to path for imports when running as script
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "llm_v2"
 
 from dotenv import load_dotenv
-from document_store_factory import create_document_store, OPENAI_BACKEND, RAG_BACKEND
-from openai_document_store import OpenAIDocumentStore
-from config import (
-    config, add_common_arguments, parse_model_from_args,
-    DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY
-)
+
+try:
+    from .document_store_factory import create_document_store, OPENAI_BACKEND, RAG_BACKEND
+    from .openai_document_store import OpenAIDocumentStore
+    from .config import (
+        add_common_arguments, parse_model_from_args,
+        DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY
+    )
+except ImportError:
+    from document_store_factory import create_document_store, OPENAI_BACKEND, RAG_BACKEND
+    from openai_document_store import OpenAIDocumentStore
+    from config import (
+        add_common_arguments, parse_model_from_args,
+        DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, DEFAULT_TEXT_VERBOSITY
+    )
 
 # Load environment variables
 load_dotenv()
@@ -39,7 +55,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Update documents for default collection (uses RAG backend)
+  # Update documents for default collection (uses RAG backend with LlamaParse)
   python document_manager.py --update
   
   # Update documents for specific collection (RAG backend)
@@ -56,13 +72,14 @@ Examples:
   python document_manager.py --openai-tools --collection "my_docs" --update
   python document_manager.py --openai-tools --query "What are the main products?"
   
-  # List all collections (OpenAI backend only)
+  # List all collections
+  python document_manager.py --list-collections
   python document_manager.py --openai-tools --list-collections
   
   # Show document store info for a collection
   python document_manager.py --collection "my_docs" --info
   
-  # Delete all documents in a collection
+  # Delete all documents in a collection (with confirmation)
   python document_manager.py --collection "my_docs" --delete
         """
     )
@@ -95,10 +112,15 @@ Examples:
     parser.add_argument("--store-md", action="store_true", help="Store markdown outputs from LlamaParse in data/rag/markdowns/ (RAG backend only)")
     parser.add_argument("--no-llama-parse", action="store_true", help="Use classical LlamaIndex parsing instead of LlamaParse (RAG backend only)")
     
+    parser.add_argument("--force", action="store_true", help="Skip confirmation prompts")
+    
     args = parser.parse_args()
     
-    # Determine backend based on --openai-tools flag
-    backend = OPENAI_BACKEND if args.openai_tools else RAG_BACKEND
+    # Determine backend based on flags (openai-tools > rag)
+    if args.openai_tools:
+        backend = OPENAI_BACKEND
+    else:
+        backend = RAG_BACKEND
     
     # Configure logging based on --info flag
     if args.info:
@@ -149,8 +171,10 @@ Examples:
                 print(f"📋 No collections with document stores found (OpenAI backend)")
         else:
             # RAG backend - read state files directly without initializing stores
-            from rag_client import RAGDocumentStore
-            from pathlib import Path
+            try:
+                from .rag_client import RAGDocumentStore
+            except ImportError:
+                from rag_client import RAGDocumentStore
             import json
             
             collections = RAGDocumentStore.list_all_collections()
@@ -174,7 +198,10 @@ Examples:
     
     # Initialize the document store using factory
     try:
-        backend_name = "OpenAI" if backend == OPENAI_BACKEND else "RAG"
+        if backend == OPENAI_BACKEND:
+            backend_name = "OpenAI"
+        else:
+            backend_name = "RAG"
         
         # Show which API provider is being used
         import os
@@ -185,16 +212,23 @@ Examples:
             provider_info = ""
         
         print(f"🔧 Using {backend_name} backend{provider_info} for collection '{args.collection}'")
-        store = create_document_store(
-            backend=backend,
-            collection=args.collection,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            text_verbosity=text_verbosity,
-            embedding_model=args.embedding_model,
-            store_md=args.store_md,
-            use_llama_parse=(not args.no_llama_parse)
-        )
+        
+        # Build store kwargs
+        store_kwargs = {
+            "backend": backend,
+            "collection": args.collection,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "text_verbosity": text_verbosity,
+            "embedding_model": args.embedding_model,
+        }
+        
+        # Add backend-specific parameters
+        if backend == RAG_BACKEND:
+            store_kwargs["store_md"] = args.store_md
+            store_kwargs["use_llama_parse"] = (not args.no_llama_parse)
+        
+        store = create_document_store(**store_kwargs)
     except Exception as e:
         print(f"❌ Error initializing document store: {e}")
         sys.exit(1)
@@ -204,7 +238,10 @@ Examples:
     if args.info and not any([args.update, args.query, args.delete]):
         info = store.get_info()
         if info:
-            backend_name = "OpenAI" if backend == OPENAI_BACKEND else "RAG"
+            if backend == OPENAI_BACKEND:
+                backend_name = "OpenAI"
+            else:
+                backend_name = "RAG"
             print(f"📊 Document store info for collection '{args.collection}':")
             print(f"  Backend: {backend_name}")
             print(f"  Total documents: {info.get('total_documents', 0)}")
@@ -218,6 +255,17 @@ Examples:
         return
     
     if args.delete:
+        # Handle confirmation for delete (unless --force is used)
+        if not args.force:
+            try:
+                confirm = input(f"\n⚠️  Are you sure you want to delete all documents in collection '{args.collection}'? Type 'yes' to confirm: ")
+                if confirm.lower() != 'yes':
+                    print("❌ Deletion cancelled")
+                    return
+            except EOFError:
+                print("❌ Cannot get confirmation in non-interactive mode. Use --force to skip confirmation.")
+                return
+        
         print(f"🗑️  Deleting documents for collection '{args.collection}'...")
         success = store.delete_documents()
         if success:
@@ -228,18 +276,26 @@ Examples:
         return
     
     if args.update:
+        update_start = time.time()
         success = store.update_documents()
+        update_elapsed = time.time() - update_start
+        
         if not success:
-            print(f"❌ Update failed for collection '{args.collection}'")
+            print(f"❌ Update failed for collection '{args.collection}' (took {update_elapsed:.1f}s)")
             sys.exit(1)
     
     if args.query:
+        query_start = time.time()
+        
         # Pass show_chunks parameter for RAG backend
         response = store.query_documents(args.query, show_chunks=args.chunks)
+        
+        query_elapsed = time.time() - query_start
+        
         if response:
             print(f"\n📝 Response:\n{response}")
         else:
-            print("❌ Query failed")
+            print(f"❌ Query failed (took {query_elapsed:.2f}s)")
             sys.exit(1)
     
     if not any([args.update, args.query, args.info, args.list_collections, args.delete]):
