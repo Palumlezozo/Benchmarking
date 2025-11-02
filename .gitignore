@@ -60,9 +60,6 @@ data/rag/*.json
 *.xlsx
 *.csv
 
-# Cadanza (project-specific, not for GitHub)
-cadenza/
-
 # Logs
 *.log
 
