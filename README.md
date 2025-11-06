@@ -5,10 +5,11 @@ A powerful, flexible document Q&A system that combines multiple document search 
 ## 🌟 Key Features
 
 ### Multi-Backend Support
-- **RAG Backend (Default)**: Local vector search using LlamaIndex + ChromaDB with Azure OpenAI or standard OpenAI
+- **RAG Backend (Default)**: Local vector search using LlamaIndex + Qdrant (default) or ChromaDB with Azure OpenAI or standard OpenAI
 - **OpenAI Backend**: Cloud-based using OpenAI's native file_search tool (use `--openai-tools` flag)
 - **Hybrid Approach**: Combine document search with real-time web search
 - **Flexible API**: Auto-detects Azure OpenAI or falls back to standard OpenAI
+- **Vector Store Options**: Qdrant (default, Docker-based) or ChromaDB (local files)
 
 ### Advanced Document Processing
 - **LlamaParse Integration**: High-quality document parsing with OCR support
@@ -45,7 +46,8 @@ A powerful, flexible document Q&A system that combines multiple document search 
 
 ### Prerequisites
 - Python 3.12 or higher
-- Poetry (recommended) or pip
+- uv (recommended) or pip
+- Docker and Docker Compose (for Qdrant vector store)
 
 ### Setup
 
@@ -55,29 +57,70 @@ git clone <repository-url>
 cd llm-v2
 ```
 
-2. **Install dependencies**
+2. **Start Qdrant (Vector Store)**
 
-Using Poetry (recommended):
+The default vector store is Qdrant, which runs in Docker:
+
 ```bash
-poetry install
-poetry shell
+# Start Qdrant container
+docker-compose up -d
+
+# Verify it's running
+docker ps | grep qdrant
+
+# Check Qdrant health
+curl http://localhost:6333/health
+```
+
+Qdrant will store data in `data/rag/qdrant/` directory.
+
+**Note:** If you prefer to use ChromaDB instead of Qdrant, you can use the `--chroma` flag with `document_manager.py`.
+
+3. **Install dependencies**
+
+Using uv (recommended):
+```bash
+# Install uv if not already installed
+# On macOS (recommended):
+brew install uv
+
+# On Linux/Windows or if you prefer the official installer:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies
+uv sync
+
+# Activate the virtual environment
+source .venv/bin/activate  # On macOS/Linux
+# or
+.venv\Scripts\activate  # On Windows
 ```
 
 Using pip:
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
-3. **Configure environment variables**
+4. **Configure environment variables**
 
 Create a `.env` file in the project root:
+
+```bash
+# Copy the example file
+cp .env.example .env
+
+# Then edit .env with your actual API keys
+# See .env.example for all available options and detailed comments
+```
+
+**Quick setup (minimum required):**
 
 ```bash
 # Azure OpenAI (used for RAG backend - default, recommended)
 AZURE_OPENAI_API_KEY=your_azure_api_key_here
 AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/v1/
 
-# Standard OpenAI (used for --openai-tools backend or as fallback)
+# OR Standard OpenAI (used for --openai-tools backend or as fallback)
 OPENAI_API_KEY=your_openai_api_key_here
 
 # Optional but recommended
@@ -85,23 +128,27 @@ TAVILY_API_KEY=your_tavily_api_key_here        # For web search
 LLAMA_CLOUD_API_KEY=your_llama_cloud_api_key  # For LlamaParse
 LLAMA_CLOUD_BASE_URL=https://api.cloud.llamaindex.ai  # Optional: European endpoint
 COHERE_API_KEY=your_cohere_api_key            # For reranking
-
 ```
 
-4. **Create document directories**
+**Note:** See `.env.example` for a complete template with all available options and detailed documentation.
+
+5. **Create document directories**
 ```bash
 mkdir -p data/documents/collection
-mkdir -p data/rag/chroma_stores
+mkdir -p data/rag/vector_stores
 ```
 
 ## ⚡ Quick Start
 
 > **Note:** Scripts can be run in two ways:
-> - **Recommended:** `poetry run python -m llm_v2.chatbot` (as module)
-> - **Alternative:** `poetry run python llm_v2/chatbot.py` (direct script)
+> - **Recommended:** `uv run python -m llm_v2.chatbot` (as module)
+> - **Alternative:** `uv run python llm_v2/chatbot.py` (direct script)
 > 
 > Both methods work identically for `chatbot.py`, `document_manager.py`, and `azure_document_manager.py`.  
 > The module method (`-m`) is recommended but not required.
+> 
+> **With activated virtual environment:** If you've activated the venv with `source .venv/bin/activate`, you can run scripts directly:
+> - `python -m llm_v2.chatbot` or `python llm_v2/chatbot.py`
 
 ### 1. Add Documents
 
@@ -122,14 +169,20 @@ data/documents/
 
 ### 2. Index Documents
 
-**Using RAG Backend (default, uses Azure OpenAI if configured):**
+**Using RAG Backend (default, uses Qdrant and Azure OpenAI if configured):**
 ```bash
 # Direct script (both --collection and --collections work):
 python llm_v2/document_manager.py --collection financials --update
 python llm_v2/document_manager.py --collections financials --update
 
 # Or as module:
-poetry run python -m llm_v2.document_manager --collection financials --update
+uv run python -m llm_v2.document_manager --collection financials --update
+
+# Or with activated venv:
+python -m llm_v2.document_manager --collection financials --update
+
+# Use ChromaDB instead of Qdrant:
+python llm_v2/document_manager.py --collection financials --update --chroma
 ```
 
 **Using OpenAI Backend (with native file_search):**
@@ -142,30 +195,30 @@ python llm_v2/document_manager.py --openai-tools --collection financials --updat
 **Interactive mode (RAG backend with Azure OpenAI):**
 ```bash
 # Recommended (as module):
-poetry run python -m llm_v2.chatbot --collection financials
+uv run python -m llm_v2.chatbot --collection financials
 
 # Alternative (direct script):
-poetry run python llm_v2/chatbot.py --collection financials
+uv run python llm_v2/chatbot.py --collection financials
 
 # Or use --collections alias:
-poetry run python -m llm_v2.chatbot --collections financials
+uv run python -m llm_v2.chatbot --collections financials
 ```
 
 **Query multiple collections:**
 ```bash
-poetry run python -m llm_v2.chatbot --collection "financials,operations,collection"
+uv run python -m llm_v2.chatbot --collection "financials,operations,collection"
 # Or:
-poetry run python -m llm_v2.chatbot --collections "financials,operations,collection"
+uv run python -m llm_v2.chatbot --collections "financials,operations,collection"
 ```
 
 **Single query:**
 ```bash
-poetry run python -m llm_v2.chatbot --collection financials --query "What were the key metrics in 2023?"
+uv run python -m llm_v2.chatbot --collection financials --query "What were the key metrics in 2023?"
 ```
 
 **Using OpenAI native tools (file_search + web_search):**
 ```bash
-poetry run python -m llm_v2.chatbot --openai-tools --collection financials
+uv run python -m llm_v2.chatbot --openai-tools --collection financials
 ```
 
 ## ☁️ Azure OpenAI Integration
@@ -237,9 +290,10 @@ This verifies:
 ┌─────────────────┐                ┌────────────────────┐
 │OpenAI Vector    │                │ RAG Document Store │
 │Store            │                │ - LlamaIndex       │
-│- Cloud-based    │                │ - ChromaDB         │
-│- Managed by     │                │ - Cohere Rerank    │
-│  OpenAI         │                │ - LlamaParse       │
+│- Cloud-based    │                │ - Qdrant (default) │
+│- Managed by     │                │   or ChromaDB      │
+│  OpenAI         │                │ - Cohere Rerank    │
+│                 │                │ - LlamaParse       │
 │                 │                │ - Azure OpenAI     │
 └─────────────────┘                │   or OpenAI        │
                                    └────────────────────┘
@@ -250,7 +304,8 @@ This verifies:
 | Feature | RAG Backend (Default) | OpenAI Backend |
 |---------|-------------|----------------|
 | **API Provider** | Azure OpenAI or Standard OpenAI | Standard OpenAI |
-| **Storage** | Local (ChromaDB) | Cloud (OpenAI) |
+| **Storage** | Local (Qdrant/ChromaDB) | Cloud (OpenAI) |
+| **Vector Store** | Qdrant (default) or ChromaDB | N/A (managed by OpenAI) |
 | **Privacy** | ✅ Full control (local storage) | ⚠️ Data sent to OpenAI |
 | **Cost** | Lower (embeddings only) | Higher (storage + search) |
 | **Performance** | Fast (local vector search) | Depends on API |
@@ -258,8 +313,8 @@ This verifies:
 | **Multi-collection** | ✅ Separate tools | ✅ Multiple stores |
 | **Page tracking** | ✅ Via LlamaParse | ✅ Native support |
 | **Web Search** | ✅ Tavily integration | ✅ OpenAI web_search |
-| **Scalability** | Limited (local storage) | High (cloud-based) |
-| **Large Documents** | ✅ Partitioning support | ⚠️ Limited by API |
+| **Scalability** | High (Qdrant) / Limited (ChromaDB) | High (cloud-based) |
+| **Large Documents** | ✅ Supported | ⚠️ Limited by API |
 
 ## 📚 Scripts Overview
 
@@ -278,23 +333,23 @@ The main interface for querying documents. Supports both interactive and single-
 **Usage:**
 ```bash
 # Interactive mode (RAG + Azure OpenAI)
-poetry run python -m llm_v2.chatbot --collection "docs1,docs2"
-poetry run python -m llm_v2.chatbot --collections "docs1,docs2"  # Both work!
+uv run python -m llm_v2.chatbot --collection "docs1,docs2"
+uv run python -m llm_v2.chatbot --collections "docs1,docs2"  # Both work!
 
 # OpenAI native tools
-poetry run python -m llm_v2.chatbot --openai-tools --collection docs
+uv run python -m llm_v2.chatbot --openai-tools --collection docs
 
 # Single query
-poetry run python -m llm_v2.chatbot --query "What is X?" --collection docs
+uv run python -m llm_v2.chatbot --query "What is X?" --collection docs
 
 # With specific model
-poetry run python -m llm_v2.chatbot --model gpt-5 --reasoning-effort high
+uv run python -m llm_v2.chatbot --model gpt-5 --reasoning-effort high
 
 # Light mode (fast and cheap)
-poetry run python -m llm_v2.chatbot --light
+uv run python -m llm_v2.chatbot --light
 
 # Debug mode
-poetry run python -m llm_v2.chatbot --info
+uv run python -m llm_v2.chatbot --info
 ```
 
 #### `document_manager.py` - Document Indexing & Management
@@ -302,17 +357,20 @@ Manages document collections: upload, index, query, delete.
 
 **Key Features:**
 - Backend selection: RAG (default) or OpenAI native (`--openai-tools`)
+- Vector store selection: Qdrant (default) or ChromaDB (`--chroma`)
 - Document indexing with LlamaParse (high-quality parsing)
-- Large document support with partitioning (`partition_pages` config)
 - Collection management (use `--collection` or `--collections`)
 - Direct querying (for testing)
 - Markdown storage from LlamaParse outputs (`--store-md`)
 
 **Usage:**
 ```bash
-# Index documents (RAG backend with Azure OpenAI)
+# Index documents (RAG backend with Qdrant and Azure OpenAI)
 python llm_v2/document_manager.py --collection docs --update
 python llm_v2/document_manager.py --collections docs --update  # Both work!
+
+# Use ChromaDB instead of Qdrant
+python llm_v2/document_manager.py --collection docs --update --chroma
 
 # Index with OpenAI native backend
 python llm_v2/document_manager.py --openai-tools --collection docs --update
@@ -337,6 +395,37 @@ python llm_v2/document_manager.py --list-collections
 python llm_v2/document_manager.py --openai-tools --list-collections  # OpenAI backend
 ```
 
+#### `company_collection_scraper.py` - Website Scraping & Collection Creation
+Scrapes company websites and saves content as markdown files to a collection.
+
+**Key Features:**
+- Tavily integration for website discovery (company name search)
+- Crawl4AI integration for multi-page website crawling
+- Interactive website selection from search results
+- Automatic markdown conversion and saving
+- Collection directory creation
+- Configurable crawl depth and page limits
+
+**Usage:**
+```bash
+# Scrape website with company name (Tavily search)
+python -m llm_v2.company_collection_scraper --collection apple --company "Apple Inc"
+
+# Scrape website with direct URL
+python -m llm_v2.company_collection_scraper --collection sonaca --website "https://www.sonaca.com"
+
+# Delete collection content
+python -m llm_v2.company_collection_scraper --collection sonaca --delete
+```
+
+**Configuration:**
+Crawl4AI settings can be configured in `llm_v2/config.py`:
+- `CRAWL4AI_MAX_DEPTH`: Maximum crawl depth (default: 2)
+- `CRAWL4AI_MAX_PAGES`: Maximum pages to crawl (default: 50)
+- `CRAWL4AI_WORD_COUNT_THRESHOLD`: Minimum words per page (default: 200)
+- `CRAWL4AI_BROWSER_TYPE`: Browser type (default: "chromium")
+- `CRAWL4AI_HEADLESS`: Run in headless mode (default: True)
+
 
 ### Supporting Modules
 
@@ -350,9 +439,10 @@ All configuration parameters in one place.
 - Tavily web search options
 
 #### `rag_client.py` - RAG Document Store
-LlamaIndex + ChromaDB implementation for local vector search with Azure OpenAI support.
+LlamaIndex + Qdrant (default) or ChromaDB implementation for local vector search with Azure OpenAI support.
 
 **Features:**
+- Qdrant vector store (default, Docker-based) or ChromaDB (local files)
 - Azure OpenAI integration (automatic fallback to standard OpenAI)
 - Document chunking with semantic splitting
 - Page number extraction from LlamaParse markers
@@ -360,6 +450,7 @@ LlamaIndex + ChromaDB implementation for local vector search with Azure OpenAI s
 - Flexible parsing modes (LlamaParse or classical LlamaIndex)
 - Cohere reranking (optional)
 - Efficient caching and state management
+- Optimized Qdrant configuration (HNSW parameters, segment settings)
 
 #### `openai_document_store.py` - OpenAI Document Store
 OpenAI's cloud-based vector store implementation.
@@ -433,10 +524,16 @@ COHERE_RERANK_TOP_N=6             # Final count after reranking
 **LlamaParse Settings:**
 ```python
 USE_LLAMA_PARSE = True
-LLAMA_PARSE_PARSE_MODE = "parse_page_with_llm"  # Quality mode
+LLAMA_PARSE_PARSE_MODE = "parse_page_with_llm"  # Quality mode (None = use multimodal model)
 LLAMA_PARSE_NUM_WORKERS = 12                     # Parallel processing
 LLAMA_PARSE_INVALIDATE_CACHE = True              # Force re-parse
-LLAMA_PARSE_PARTITION_PAGES = 100                # Pages per partition for large docs (None = disable)
+
+# Azure OpenAI Configuration for LlamaParse (optional)
+LLAMA_PARSE_USE_VENDOR_MULTIMODAL_MODEL = True   # Use vendor multimodal model
+LLAMA_PARSE_VENDOR_MULTIMODAL_MODEL_NAME = "openai-gpt-5-mini"  # Vendor multimodal model name
+LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME = "gpt-5-mini"  # Azure OpenAI deployment name
+LLAMA_PARSE_AZURE_OPENAI_ENDPOINT = "https://..."  # Azure OpenAI endpoint URL
+LLAMA_PARSE_AZURE_OPENAI_API_VERSION = "2025-01-01-preview"  # API version
 ```
 
 **Tavily Settings:**
@@ -444,6 +541,36 @@ LLAMA_PARSE_PARTITION_PAGES = 100                # Pages per partition for large
 DEFAULT_TAVILY_MAX_RESULTS = 5
 DEFAULT_TAVILY_SEARCH_DEPTH = "basic"  # or "advanced"
 DEFAULT_TAVILY_INCLUDE_ANSWER = True
+```
+
+**Qdrant Optimization Settings:**
+```python
+# HNSW Index Parameters
+QDRANT_HNSW_M = 16  # Number of bi-directional links (12-16 recommended)
+QDRANT_HNSW_EF_CONSTRUCT = 200  # Candidate list size during construction (100-200)
+QDRANT_HNSW_FULL_SCAN_THRESHOLD = 10000  # Use full scan if collection smaller than this
+
+# Memory and Storage
+QDRANT_ON_DISK = False  # Store vectors on disk (False = faster, True = less RAM)
+QDRANT_ON_DISK_PAYLOAD = True  # Store payload on disk (recommended)
+
+# Segment Configuration
+QDRANT_DEFAULT_SEGMENT_NUMBER = None  # Auto (set to CPU cores for optimal parallelism)
+QDRANT_MAX_SEGMENT_SIZE = None  # Auto
+
+# Optimizer Configuration
+QDRANT_DELETED_THRESHOLD = 0.2  # Vacuum trigger threshold (20%)
+QDRANT_INDEXING_THRESHOLD = 10000  # Min vectors before creating index
+QDRANT_FLUSH_INTERVAL_SEC = 5  # Flush interval
+```
+
+**Crawl4AI Settings (for website scraping):**
+```python
+CRAWL4AI_BROWSER_TYPE = "chromium"  # "chromium", "firefox", "webkit"
+CRAWL4AI_HEADLESS = True  # Run in headless mode
+CRAWL4AI_MAX_DEPTH = 2  # Maximum crawl depth
+CRAWL4AI_MAX_PAGES = 50  # Maximum pages to crawl
+CRAWL4AI_WORD_COUNT_THRESHOLD = 200  # Minimum words per page
 ```
 
 **Reranking Settings:**
@@ -464,7 +591,7 @@ python llm_v2/document_manager.py --collection reports --update
 
 **2. Chat with the collection:**
 ```bash
-poetry run python -m llm_v2.chatbot --collection reports
+uv run python -m llm_v2.chatbot --collection reports
 ```
 
 **3. Ask a question:**
@@ -476,35 +603,35 @@ You> What were the revenue figures for Q4?
 
 **Query across multiple years:**
 ```bash
-poetry run python -m llm_v2.chatbot --collection "2022_reports,2023_reports,2024_reports" \
+uv run python -m llm_v2.chatbot --collection "2022_reports,2023_reports,2024_reports" \
   --query "Compare revenue growth across all years"
 ```
 
 **Query different document types:**
 ```bash
-poetry run python -m llm_v2.chatbot --collection "financials,operations,compliance"
+uv run python -m llm_v2.chatbot --collection "financials,operations,compliance"
 ```
 
 ### Advanced Querying
 
 **High-quality mode:**
 ```bash
-poetry run python -m llm_v2.chatbot --model gpt-5 --reasoning-effort high --collection reports
+uv run python -m llm_v2.chatbot --model gpt-5 --reasoning-effort high --collection reports
 ```
 
 **Fast/economical mode:**
 ```bash
-poetry run python -m llm_v2.chatbot --light --collection reports
+uv run python -m llm_v2.chatbot --light --collection reports
 ```
 
 **With OpenAI native tools:**
 ```bash
-poetry run python -m llm_v2.chatbot --openai-tools --collection reports
+uv run python -m llm_v2.chatbot --openai-tools --collection reports
 ```
 
 **Debug mode (show API calls):**
 ```bash
-poetry run python -m llm_v2.chatbot --info --collection reports --query "What is X?"
+uv run python -m llm_v2.chatbot --info --collection reports --query "What is X?"
 ```
 
 ### Table Extraction
@@ -584,6 +711,9 @@ For best results with PDFs containing tables, charts, or complex layouts:
    LLAMA_CLOUD_API_KEY=llx-...
    # Optional: Use European endpoint for GDPR compliance
    LLAMA_CLOUD_BASE_URL=https://api.cloud.llamaindex.ai
+   
+   # Optional: Azure OpenAI for LlamaParse multimodal model
+   LLAMA_PARSE_AZURE_OPENAI_KEY=your_azure_key  # If using Azure OpenAI with LlamaParse
    ```
 3. LlamaParse automatically extracts:
    - Tables as markdown
@@ -591,7 +721,21 @@ For best results with PDFs containing tables, charts, or complex layouts:
    - Text from images (OCR)
    - Complex layouts
 
-**Note:** If `LLAMA_CLOUD_BASE_URL` is set, the system will use that endpoint (e.g., European endpoint for data residency requirements)
+**Azure OpenAI Integration for LlamaParse:**
+
+You can configure LlamaParse to use Azure OpenAI's multimodal models for better document parsing. Configure in `config.py`:
+
+```python
+LLAMA_PARSE_USE_VENDOR_MULTIMODAL_MODEL = True
+LLAMA_PARSE_VENDOR_MULTIMODAL_MODEL_NAME = "openai-gpt-5-mini"
+LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME = "gpt-5-mini"
+LLAMA_PARSE_AZURE_OPENAI_ENDPOINT = "https://your-resource.openai.azure.com/..."
+LLAMA_PARSE_AZURE_OPENAI_API_VERSION = "2025-01-01-preview"
+```
+
+**Note:** 
+- If `LLAMA_CLOUD_BASE_URL` is set, the system will use that endpoint (e.g., European endpoint for data residency requirements)
+- When using vendor multimodal model, set `LLAMA_PARSE_PARSE_MODE = None` (multimodal mode doesn't work with `parse_page_with_llm` mode)
 
 #### Storing Markdown Outputs (`--store-md`)
 
@@ -609,25 +753,6 @@ python llm_v2/document_manager.py --collection docs --update --store-md
 - Archive parsed documents
 
 Markdown files are saved with the same name as the source document (e.g., `report.pdf` → `report.md`)
-
-#### Large Document Partitioning
-
-For very large documents (e.g., annual reports with 500+ pages), enable partitioning to split documents into smaller chunks for processing:
-
-**Configuration in `config.py`:**
-```python
-LLAMA_PARSE_PARTITION_PAGES = 100  # Number of pages per partition (None = disable)
-```
-
-**How it works:**
-- Documents larger than the partition size are split into multiple partitions
-- Each partition is processed separately and combined automatically
-- Results are merged into a single document with correct page numbering (`<!-- PAGE: N -->`)
-- Improves processing reliability for very large documents
-- Automatically handles multiple JobResults per file
-
-**Example:**
-A 250-page document with `partition_pages=100` will be split into 3 partitions (pages 1-100, 101-200, 201-250), processed separately, then combined with correct page markers.
 
 #### Classical Parsing Mode (`--no-llama-parse`)
 
@@ -765,13 +890,62 @@ python llm_v2/document_manager.py --collection collection --update
    USE_COHERE_RERANK = False
    ```
 
+### Qdrant Connection Issues
+
+**Qdrant not starting or connection errors:**
+
+The system now provides clear error messages when Qdrant is configured but not responding:
+
+```
+❌ Error: Qdrant is configured but not responding.
+   Host: localhost:6333
+   Error: Connection refused
+   Please ensure Qdrant is running and accessible.
+   You can start Qdrant with: docker run -p 6333:6333 qdrant/qdrant
+```
+
+**Troubleshooting steps:**
+
+1. **Check Docker is running:**
+   ```bash
+   docker ps
+   ```
+
+2. **Start Qdrant:**
+   ```bash
+   docker-compose up -d
+   # Or manually:
+   docker run -p 6333:6333 qdrant/qdrant
+   ```
+
+3. **Check Qdrant health:**
+   ```bash
+   curl http://localhost:6333/health
+   ```
+
+4. **View Qdrant logs:**
+   ```bash
+   docker logs qdrant
+   ```
+
+5. **Verify connection:**
+   The system automatically tests the connection during initialization. If you see connection errors, ensure:
+   - Qdrant container is running (`docker ps | grep qdrant`)
+   - Port 6333 is accessible (not blocked by firewall)
+   - Host and port in config match your setup
+
+6. **Use ChromaDB as fallback:**
+   ```bash
+   python llm_v2/document_manager.py --collection docs --update --chroma
+   ```
+
 ### Import Errors
 
 **Missing dependencies:**
 ```bash
-poetry install
+uv sync
 # or
-pip install -r requirements.txt
+pip install -e .
 ```
 
 **Module not found:**
@@ -800,6 +974,12 @@ export PYTHONPATH=/path/to/llm-v2:$PYTHONPATH
    LLAMA_PARSE_NUM_WORKERS = 4  # Reduced from 12 (default)
    ```
 
+4. **Optimize Qdrant settings (in config.py):**
+   ```python
+   QDRANT_ON_DISK = True  # Store vectors on disk instead of RAM
+   QDRANT_DEFAULT_SEGMENT_NUMBER = 2  # Reduce parallelism
+   ```
+
 ## 📁 Project Structure
 
 ```
@@ -826,14 +1006,18 @@ llm-v2/
 │   │   ├── financials/              # Example: Financial documents
 │   │   └── operations/              # Example: Operations documents
 │   └── rag/
-│       ├── chroma_stores/           # ChromaDB vector stores
+│       ├── qdrant/                  # Qdrant vector store data (Docker volume)
+│       ├── chroma_stores/           # ChromaDB vector stores (legacy/--chroma)
+│       ├── vector_stores/           # Collection state files (RAG backend)
 │       ├── markdowns/               # Markdown outputs from LlamaParse (with --store-md)
 │       ├── openai_state.json        # OpenAI backend state
 │       └── rag_state.json           # RAG backend state (per collection)
 ├── tests/                           # Test files
 ├── .env                            # Environment variables (create this)
-├── pyproject.toml                  # Python project config
-├── poetry.lock                     # Dependency lock file
+├── .python-version                 # Python version for uv
+├── pyproject.toml                  # Python project config (PEP 621)
+├── uv.lock                         # Dependency lock file (uv)
+├── poetry.lock                     # Legacy lock file (can be removed)
 └── README.md                       # This file
 ```
 
@@ -849,8 +1033,8 @@ llm-v2/
    └─> python llm_v2/document_manager.py --collection <name> --update
 
 3. Query Documents
-   ├─> Interactive: poetry run python -m llm_v2.chatbot --collection <name>
-   └─> Single query: poetry run python -m llm_v2.chatbot --collection <name> --query "..."
+   ├─> Interactive: uv run python -m llm_v2.chatbot --collection <name>
+   └─> Single query: uv run python -m llm_v2.chatbot --collection <name> --query "..."
 
 4. (Optional) Update Index
    └─> Re-run step 2 when documents change
@@ -870,7 +1054,7 @@ llm-v2/
    └─> python llm_v2/document_manager.py --collection forecasts --update
 
 3. Query Multiple Collections
-   └─> poetry run python -m llm_v2.chatbot --collection "2023_reports,2024_reports,forecasts"
+   └─> uv run python -m llm_v2.chatbot --collection "2023_reports,2024_reports,forecasts"
 ```
 
 ## 📊 Performance Tips
@@ -878,7 +1062,7 @@ llm-v2/
 ### For Best Quality
 ```bash
 # Use GPT-5 with high reasoning
-poetry run python -m llm_v2.chatbot \
+uv run python -m llm_v2.chatbot \
   --model gpt-5 \
   --reasoning-effort high \
   --collection docs
@@ -892,10 +1076,10 @@ TAVILY_API_KEY=...       # Web search
 ### For Best Speed
 ```bash
 # Use light mode
-poetry run python -m llm_v2.chatbot --light --collection docs
+uv run python -m llm_v2.chatbot --light --collection docs
 
 # Or manually specify
-poetry run python -m llm_v2.chatbot \
+uv run python -m llm_v2.chatbot \
   --model gpt-5-nano \
   --reasoning-effort low \
   --collection docs
@@ -907,7 +1091,7 @@ poetry run python -m llm_v2.chatbot \
 python llm_v2/document_manager.py --update
 
 # Use nano model
-poetry run python -m llm_v2.chatbot --model gpt-5-nano
+uv run python -m llm_v2.chatbot --model gpt-5-nano
 
 # Disable reranking
 # Edit config.py: USE_COHERE_RERANK = False
@@ -934,15 +1118,7 @@ For questions or issues:
 
 ---
 
-**Version:** 0.2.0
-**Last Updated:** January 2025  
+**Version:** 0.3.0
+**Last Updated:** November 2025  
 **Python:** 3.12+
 
-## 📝 Recent Changes
-
-### Version 0.2.0
-- ✅ Removed Azure AI Search backend (moved to `archive/` folder)
-- ✅ Simplified to two backends: RAG (default) and OpenAI (`--openai-tools`)
-- ✅ Enhanced LlamaParse support with partitioning for large documents
-- ✅ Improved batch processing with proper JobResult handling
-- ✅ Updated document processing pipeline with page marker reconstruction

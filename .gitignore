@@ -26,8 +26,9 @@ ENV/
 env/
 .venv
 
-# Poetry
-poetry.lock
+# Package managers
+poetry.lock  # Legacy - can be removed after migration
+# uv.lock should be committed (not ignored)
 
 # IDEs
 .idea/
@@ -52,7 +53,9 @@ data/documents/**/*
 
 # RAG data (but keep directory structure with .gitkeep)
 data/rag/chroma_stores/**/*
+data/rag/qdrant/**/*
 data/rag/markdowns/**/*
+data/rag/vector_stores/**/*  # State files in subdirectories
 data/rag/*.json
 !data/rag/**/.gitkeep
 
@@ -73,3 +76,14 @@ data/rag/*.json
 .pytest_cache/
 .coverage
 htmlcov/
+tests/**/llamaparse_output/
+tests/**/output/
+
+# SQLite databases
+*.sqlite3
+*.sqlite
+*.db
+
+# Windows
+Thumbs.db
+desktop.ini

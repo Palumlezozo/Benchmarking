@@ -217,7 +217,9 @@ class DocumentChatbot:
                     
                     # Successfully loaded
                     tools.append(rag_tool)
-                    doc_count = rag_tool.rag_store.state.get("total_documents", 0)
+                    # Count indexed documents from state (same logic as get_info())
+                    documents = rag_tool.rag_store.state.get("documents", {})
+                    doc_count = len([doc for doc in documents.values() if doc.get("indexed", False)])
                     loaded_collections.append(f"{collection} ({doc_count} docs)")
                     
                 except Exception as e:
@@ -846,7 +848,7 @@ Examples:
     )
     
     # Add common configuration arguments
-    add_common_arguments(parser, include_concurrent=False, include_timeout=False, include_similarity=False, include_embedding_model=True)
+    add_common_arguments(parser, include_similarity=False, include_embedding_model=True)
     
     args = parser.parse_args()
     

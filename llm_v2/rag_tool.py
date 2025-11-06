@@ -7,9 +7,9 @@ and retrieve relevant information.
 
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional
-from tool_base import Tool, ToolResult
-from rag_client import RAGDocumentStore
+from typing import Dict, Any, List
+from tool_base import Tool
+from rag_client import RAGDocumentStore, DEFAULT_STORAGE_DIR
 from config import DEFAULT_EMBEDDING_MODEL, DEFAULT_TOP_K
 
 # Set up logger
@@ -17,13 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 class RAGSearchTool(Tool):
-    """Tool for searching documents using RAG (LlamaIndex + Chroma)."""
+    """Tool for searching documents using RAG (LlamaIndex + Qdrant or Chroma)."""
     
     def __init__(
         self,
         collection: str,
         documents_dir: str = "data/documents",
-        storage_dir: str = "data/rag/chroma_stores",
+        storage_dir: str = DEFAULT_STORAGE_DIR,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         top_k: int = DEFAULT_TOP_K
     ):
@@ -33,7 +33,7 @@ class RAGSearchTool(Tool):
         Args:
             collection: Collection name to search
             documents_dir: Base directory for documents
-            storage_dir: Directory for Chroma storage
+            storage_dir: Directory for vector store storage (Qdrant/Chroma)
             embedding_model: OpenAI embedding model to use
             top_k: Number of chunks to retrieve
         """
@@ -151,13 +151,10 @@ The tool will retrieve the most relevant document excerpts related to your searc
         if not self.rag_store.index:
             try:
                 logger.info(f"   Loading vector index for collection '{self.collection}'...")
-                from llama_index.vector_stores.chroma import ChromaVectorStore
                 from llama_index.core import VectorStoreIndex
                 
-                chroma_collection = self.rag_store.chroma_client.get_collection(
-                    name=f"{self.collection}_vectors"
-                )
-                vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+                collection_name = f"{self.collection}_vectors"
+                vector_store = self.rag_store._get_vector_store_for_loading(collection_name)
                 self.rag_store.index = VectorStoreIndex.from_vector_store(vector_store)
                 logger.info(f"   ✅ Index loaded successfully")
             except Exception as e:

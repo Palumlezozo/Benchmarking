@@ -1,8 +1,8 @@
 """
-RAG Document Store using LlamaIndex and Chroma.
+RAG Document Store using LlamaIndex with Qdrant or Chroma.
 
 This module provides a document store implementation using LlamaIndex for indexing
-and Chroma as the vector store backend.
+with Qdrant (default) or Chroma as the vector store backend.
 """
 
 import json
@@ -10,6 +10,7 @@ import os
 import warnings
 import time
 import asyncio
+import io
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime as dt
@@ -22,11 +23,43 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext, Settings, Document
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.readers.file import PDFReader
-import chromadb
 import re
+from pypdf import PdfReader as PypdfReader, PdfWriter
+
+# Vector store imports (conditional)
+try:
+    from llama_index.vector_stores.qdrant import QdrantVectorStore
+    QDRANT_AVAILABLE = True
+except ImportError:
+    QDRANT_AVAILABLE = False
+    QdrantVectorStore = None
+
+try:
+    from llama_index.vector_stores.chroma import ChromaVectorStore
+    import chromadb
+    CHROMA_AVAILABLE = True
+except ImportError:
+    CHROMA_AVAILABLE = False
+    ChromaVectorStore = None
+    chromadb = None
+
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import (
+        Distance, VectorParams, HnswConfigDiff, 
+        OptimizersConfigDiff, VectorsConfig
+    )
+    QDRANT_CLIENT_AVAILABLE = True
+except ImportError:
+    QDRANT_CLIENT_AVAILABLE = False
+    QdrantClient = None
+    Distance = None
+    VectorParams = None
+    HnswConfigDiff = None
+    OptimizersConfigDiff = None
+    VectorsConfig = None
 
 # LlamaParse imports
 try:
@@ -48,14 +81,29 @@ from document_store_base import DocumentStore
 from config import (
     DEFAULT_EMBEDDING_MODEL,
     EMBEDDING_BATCH_SIZE,
-    EMBEDDING_DELAY_SECONDS,
-    MAX_NODES_PER_BATCH,
     DEFAULT_MODEL,
     DEFAULT_REASONING_EFFORT,
     DEFAULT_TEXT_VERBOSITY,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_TOP_K,
+    USE_QDRANT,
+    QDRANT_HOST,
+    QDRANT_PORT,
+    QDRANT_API_KEY,
+    QDRANT_HNSW_M,
+    QDRANT_HNSW_EF_CONSTRUCT,
+    QDRANT_HNSW_EF,
+    QDRANT_HNSW_FULL_SCAN_THRESHOLD,
+    QDRANT_ON_DISK,
+    QDRANT_ON_DISK_PAYLOAD,
+    QDRANT_DEFAULT_SEGMENT_NUMBER,
+    QDRANT_MAX_SEGMENT_SIZE,
+    QDRANT_MEMMAP_THRESHOLD,
+    QDRANT_DELETED_THRESHOLD,
+    QDRANT_VACUUM_MIN_VECTOR_NUMBER,
+    QDRANT_INDEXING_THRESHOLD,
+    QDRANT_FLUSH_INTERVAL_SEC,
     USE_LLAMA_PARSE,
     LLAMA_PARSE_RESULT_TYPE,
     LLAMA_PARSE_VERBOSE,
@@ -67,10 +115,15 @@ from config import (
     LLAMA_PARSE_SKIP_DIAGONAL_TEXT,
     LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES,
     LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION,
-    LLAMA_PARSE_PARTITION_PAGES,
+    LLAMA_PARSE_USE_VENDOR_MULTIMODAL_MODEL,
+    LLAMA_PARSE_VENDOR_MULTIMODAL_MODEL_NAME,
+    LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME,
+    LLAMA_PARSE_AZURE_OPENAI_ENDPOINT,
+    LLAMA_PARSE_AZURE_OPENAI_API_VERSION,
     USE_COHERE_RERANK,
     COHERE_RERANK_MODEL,
-    COHERE_RERANK_TOP_N
+    COHERE_RERANK_TOP_N,
+    DOCUMENT_BATCH_SIZE
 )
 
 # Load environment variables
@@ -82,7 +135,7 @@ load_dotenv()
 
 # Storage paths
 DEFAULT_DOCUMENTS_DIR = "data/documents"
-DEFAULT_STORAGE_DIR = "data/rag/chroma_stores"
+DEFAULT_STORAGE_DIR = "data/rag/vector_stores"  # Changed from chroma_stores for compatibility with both stores
 DEFAULT_MARKDOWNS_DIR = "data/rag/markdowns"
 
 # File types supported by LlamaParse (that may contain page markers)
@@ -91,9 +144,28 @@ LLAMAPARSE_SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.pptx', '.ppt', '.x
 # Note: DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, and DEFAULT_TOP_K are imported from config.py
 # ============================================================================
 
+# Embedding model dimensions mapping
+EMBEDDING_DIMENSIONS = {
+    "text-embedding-3-large": 3072,
+    "text-embedding-3-small": 1536,
+    "text-embedding-ada-002": 1536,
+}
+
+def _get_embedding_dimension(embedding_model: str) -> int:
+    """
+    Get the embedding dimension for a given model.
+    
+    Args:
+        embedding_model: Name of the embedding model
+        
+    Returns:
+        Dimension size (defaults to 1536 if unknown)
+    """
+    return EMBEDDING_DIMENSIONS.get(embedding_model, 1536)
+
 
 class RAGDocumentStore(DocumentStore):
-    """Document store implementation using LlamaIndex + Chroma."""
+    """Document store implementation using LlamaIndex with Qdrant (default) or Chroma."""
     
     def __init__(
         self, 
@@ -107,7 +179,8 @@ class RAGDocumentStore(DocumentStore):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         store_md: bool = False,
-        use_llama_parse: bool = None
+        use_llama_parse: bool = None,
+        vector_store_type: Optional[str] = None
     ):
         """
         Initialize the RAG document store.
@@ -115,7 +188,7 @@ class RAGDocumentStore(DocumentStore):
         Args:
             collection: Collection name
             documents_dir: Base directory for documents
-            storage_dir: Directory for Chroma storage
+            storage_dir: Directory for vector store storage (local for Chroma)
             embedding_model: OpenAI embedding model to use
             model: LLM model for queries
             reasoning_effort: Reasoning effort level
@@ -124,22 +197,36 @@ class RAGDocumentStore(DocumentStore):
             chunk_overlap: Overlap between chunks
             store_md: Whether to store markdown outputs from LlamaParse
             use_llama_parse: Override config to force LlamaParse on/off (None = use config setting)
+            vector_store_type: Vector store type ("qdrant" or "chroma"). None = use config default (Qdrant)
         """
         super().__init__(collection)
         self.documents_dir = Path(documents_dir) / collection
-        self.storage_dir = Path(storage_dir) / collection
         self.markdowns_dir = Path(DEFAULT_MARKDOWNS_DIR) / collection
         self.embedding_model = embedding_model
-        self.model = model
-        self.reasoning_effort = reasoning_effort
-        self.text_verbosity = text_verbosity
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.store_md = store_md
         # Override config setting if explicitly specified
         self.use_llama_parse_override = use_llama_parse
         
-        # Create storage directory if it doesn't exist
+        # Determine vector store type
+        if vector_store_type is None:
+            self.vector_store_type = "qdrant" if USE_QDRANT else "chroma"
+        else:
+            self.vector_store_type = vector_store_type.lower()
+        
+        if self.vector_store_type not in ["qdrant", "chroma"]:
+            raise ValueError(f"Unsupported vector_store_type: {self.vector_store_type}. Must be 'qdrant' or 'chroma'")
+        
+        # Handle storage directory with backward compatibility
+        # For Qdrant, prefer new vector_stores path; for Chroma, use provided path or legacy path
+        if self.vector_store_type == "qdrant" and ("chroma_stores" in str(storage_dir) or storage_dir == "data/rag/chroma_stores"):
+            # Switch to new vector_stores path for Qdrant when legacy path is detected
+            self.storage_dir = Path(DEFAULT_STORAGE_DIR) / collection
+        else:
+            self.storage_dir = Path(storage_dir) / collection
+        
+        # Create storage directory if it doesn't exist (needed for Chroma)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         # Create markdowns directory if markdown storage is enabled
         if self.store_md:
@@ -178,23 +265,23 @@ class RAGDocumentStore(DocumentStore):
         Settings.chunk_size = chunk_size
         Settings.chunk_overlap = chunk_overlap
         
-        # Initialize Chroma client
-        self.chroma_client = chromadb.PersistentClient(path=str(self.storage_dir))
+        # Initialize vector store client
+        self._initialize_vector_store_client()
         
         # Vector store and index (will be initialized in update_documents)
         self.index = None
-        self.retriever = None
         
         print(f"📚 RAG Document Store initialized for collection '{collection}'")
+        print(f"   Vector Store: {self.vector_store_type.upper()}")
         print(f"   Documents: {self.documents_dir}")
         print(f"   Storage: {self.storage_dir}")
         if self.store_md:
             print(f"   Markdowns: {self.markdowns_dir}")
         print(f"   Embedding Model: {embedding_model}")
         
-        # Store LlamaParse configuration (will create parser dynamically per batch)
+        # Store LlamaParse configuration and create parser at class level
         self.llama_parse_config = self._get_llama_parse_config()
-        # For backward compatibility, create a default parser
+        # Create parser once at initialization (reused for all parsing operations)
         self.llama_parse_parser = self._create_llama_parse_parser() if self.llama_parse_config else None
         
         # Initialize Cohere reranker if enabled and available
@@ -234,26 +321,43 @@ class RAGDocumentStore(DocumentStore):
             "result_type": LLAMA_PARSE_RESULT_TYPE,
             "verbose": LLAMA_PARSE_VERBOSE,
             "language": LLAMA_PARSE_LANGUAGE,
-            "parse_mode": LLAMA_PARSE_PARSE_MODE,
             "invalidate_cache": LLAMA_PARSE_INVALIDATE_CACHE,
             "do_not_cache": LLAMA_PARSE_DO_NOT_CACHE,
             "num_workers": LLAMA_PARSE_NUM_WORKERS,
             "skip_diagonal_text": LLAMA_PARSE_SKIP_DIAGONAL_TEXT,
             "spreadsheet_extract_sub_tables": LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES,
-            "spreadsheet_force_formula_computation": LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION
+            "spreadsheet_force_formula_computation": LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION,
+            "check_interval": 10
         }
         
-        # Add partition_pages if specified (for large document processing)
-        if LLAMA_PARSE_PARTITION_PAGES is not None:
-            config["partition_pages"] = LLAMA_PARSE_PARTITION_PAGES
+        if LLAMA_PARSE_PARSE_MODE:
+            config["parse_mode"] = LLAMA_PARSE_PARSE_MODE
+        # Add Azure OpenAI configuration if specified
+        if LLAMA_PARSE_USE_VENDOR_MULTIMODAL_MODEL:
+            config["use_vendor_multimodal_model"] = True
+            config["vendor_multimodal_model_name"] = LLAMA_PARSE_VENDOR_MULTIMODAL_MODEL_NAME
+        
+        if LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME:
+            config["azure_openai_deployment_name"] = LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME
+        
+        if LLAMA_PARSE_AZURE_OPENAI_ENDPOINT:
+            config["azure_openai_endpoint"] = LLAMA_PARSE_AZURE_OPENAI_ENDPOINT
+        
+        if LLAMA_PARSE_AZURE_OPENAI_API_VERSION:
+            config["azure_openai_api_version"] = LLAMA_PARSE_AZURE_OPENAI_API_VERSION
+        
+        # Azure OpenAI key can come from config or environment variable
+        azure_openai_key = os.getenv("LLAMA_PARSE_AZURE_OPENAI_KEY")
+        if azure_openai_key:
+            config["azure_openai_key"] = azure_openai_key
         
         # Add base_url if specified (for European or custom endpoints)
         if base_url:
             config["base_url"] = base_url
         
         endpoint_info = f" (endpoint: {base_url})" if base_url else ""
-        partition_info = f", partition_pages={LLAMA_PARSE_PARTITION_PAGES}" if LLAMA_PARSE_PARTITION_PAGES is not None else ""
-        print(f"✅ LlamaParse enabled{endpoint_info} (result_type={LLAMA_PARSE_RESULT_TYPE}, parse_mode={LLAMA_PARSE_PARSE_MODE}, workers={LLAMA_PARSE_NUM_WORKERS}{partition_info})")
+        
+        print(f"   LlamaParse enabled{endpoint_info} (result_type={LLAMA_PARSE_RESULT_TYPE}, parse_mode={LLAMA_PARSE_PARSE_MODE}, workers={LLAMA_PARSE_NUM_WORKERS})")
         
         return config
     
@@ -310,11 +414,214 @@ class RAGDocumentStore(DocumentStore):
                 model=COHERE_RERANK_MODEL,
                 top_n=COHERE_RERANK_TOP_N
             )
-            print(f"✅ Cohere Rerank enabled (model={COHERE_RERANK_MODEL}, top_n={COHERE_RERANK_TOP_N})")
+            print(f"   Cohere Rerank enabled (model={COHERE_RERANK_MODEL}, top_n={COHERE_RERANK_TOP_N})")
             return reranker
         except Exception as e:
             print(f"⚠️  Failed to initialize Cohere reranker: {e}")
             return None
+    
+    def _initialize_vector_store_client(self):
+        """Initialize the vector store client based on type."""
+        if self.vector_store_type == "qdrant":
+            if not QDRANT_CLIENT_AVAILABLE:
+                raise ImportError("Qdrant client not available. Install with: pip install qdrant-client")
+            if not QDRANT_AVAILABLE:
+                raise ImportError("Qdrant vector store not available. Install with: pip install llama-index-vector-stores-qdrant")
+            
+            # Initialize Qdrant client
+            client_kwargs = {
+                "host": QDRANT_HOST,
+                "port": QDRANT_PORT
+            }
+            if QDRANT_API_KEY:
+                client_kwargs["api_key"] = QDRANT_API_KEY
+            
+            try:
+                self.qdrant_client = QdrantClient(**client_kwargs)
+                # Test connection by attempting to get collections
+                self.qdrant_client.get_collections()
+                self.vector_client = self.qdrant_client  # Alias for compatibility
+                print(f"   Connected to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}")
+            except Exception as e:
+                error_msg = (
+                    f"❌ Error: Qdrant is configured but not responding.\n"
+                    f"   Host: {QDRANT_HOST}:{QDRANT_PORT}\n"
+                    f"   Error: {str(e)}\n"
+                    f"   Please ensure Qdrant is running and accessible.\n"
+                    f"   You can start Qdrant with: docker run -p {QDRANT_PORT}:6333 qdrant/qdrant"
+                )
+                raise ConnectionError(error_msg) from e
+            
+        elif self.vector_store_type == "chroma":
+            if not CHROMA_AVAILABLE:
+                raise ImportError("Chroma not available. Install with: pip install chromadb llama-index-vector-stores-chroma")
+            
+            # Initialize Chroma client
+            self.chroma_client = chromadb.PersistentClient(path=str(self.storage_dir))
+            self.vector_client = self.chroma_client  # Alias for compatibility
+            print(f"   Using Chroma (local storage)")
+        else:
+            raise ValueError(f"Unsupported vector_store_type: {self.vector_store_type}")
+    
+    def _create_vector_store(self, collection_name: str) -> Any:
+        """
+        Create LlamaIndex vector store wrapper.
+        Creates Qdrant collection with optimized parameters if it doesn't exist.
+        
+        Args:
+            collection_name: Name of the collection
+            
+        Returns:
+            LlamaIndex vector store instance
+        """
+        if self.vector_store_type == "qdrant":
+            if not QDRANT_AVAILABLE:
+                raise ImportError("Qdrant vector store not available")
+            
+            # Get embedding dimension
+            embedding_dim = _get_embedding_dimension(self.embedding_model)
+            
+            # Check if collection exists
+            try:
+                collections = self.qdrant_client.get_collections().collections
+            except Exception as e:
+                error_msg = (
+                    f"❌ Error: Qdrant is not responding when trying to access collections.\n"
+                    f"   Host: {QDRANT_HOST}:{QDRANT_PORT}\n"
+                    f"   Error: {str(e)}\n"
+                    f"   Please ensure Qdrant is running and accessible."
+                )
+                raise ConnectionError(error_msg) from e
+            
+            collection_exists = any(col.name == collection_name for col in collections)
+            
+            if not collection_exists:
+                # Create collection with optimized parameters
+                # Build HNSW config
+                hnsw_config = HnswConfigDiff(
+                    m=QDRANT_HNSW_M,
+                    ef_construct=QDRANT_HNSW_EF_CONSTRUCT,
+                    full_scan_threshold=QDRANT_HNSW_FULL_SCAN_THRESHOLD,
+                    on_disk=QDRANT_ON_DISK,
+                )
+                
+                # Build optimizer config
+                optimizer_config = OptimizersConfigDiff(
+                    deleted_threshold=QDRANT_DELETED_THRESHOLD,
+                    vacuum_min_vector_number=QDRANT_VACUUM_MIN_VECTOR_NUMBER,
+                    default_segment_number=QDRANT_DEFAULT_SEGMENT_NUMBER,
+                    max_segment_size=QDRANT_MAX_SEGMENT_SIZE,
+                    memmap_threshold=QDRANT_MEMMAP_THRESHOLD,
+                    indexing_threshold=QDRANT_INDEXING_THRESHOLD,
+                    flush_interval_sec=QDRANT_FLUSH_INTERVAL_SEC,
+                )
+                
+                # Create collection with optimized parameters
+                try:
+                    self.qdrant_client.create_collection(
+                        collection_name=collection_name,
+                        vectors_config=VectorParams(
+                            size=embedding_dim,
+                            distance=Distance.COSINE,
+                            on_disk=QDRANT_ON_DISK,
+                        ),
+                        hnsw_config=hnsw_config,
+                        optimizers_config=optimizer_config,
+                        on_disk_payload=QDRANT_ON_DISK_PAYLOAD,
+                    )
+                    print(f"   Created Qdrant collection '{collection_name}' with optimized parameters")
+                    print(f"      Dimension: {embedding_dim}, HNSW M: {QDRANT_HNSW_M}, EF Construct: {QDRANT_HNSW_EF_CONSTRUCT}")
+                except Exception as e:
+                    error_msg = (
+                        f"❌ Error: Qdrant is not responding when trying to create collection.\n"
+                        f"   Host: {QDRANT_HOST}:{QDRANT_PORT}\n"
+                        f"   Collection: {collection_name}\n"
+                        f"   Error: {str(e)}\n"
+                        f"   Please ensure Qdrant is running and accessible."
+                    )
+                    raise ConnectionError(error_msg) from e
+            
+            return QdrantVectorStore(
+                client=self.qdrant_client,
+                collection_name=collection_name
+            )
+        elif self.vector_store_type == "chroma":
+            if not CHROMA_AVAILABLE:
+                raise ImportError("Chroma vector store not available")
+            
+            chroma_collection = self.chroma_client.get_or_create_collection(
+                name=collection_name
+            )
+            return ChromaVectorStore(chroma_collection=chroma_collection)
+        else:
+            raise ValueError(f"Unsupported vector_store_type: {self.vector_store_type}")
+    
+    def _get_vector_store_for_loading(self, collection_name: str) -> Any:
+        """
+        Get existing vector store for loading an index.
+        
+        Args:
+            collection_name: Name of the collection
+            
+        Returns:
+            LlamaIndex vector store instance
+        """
+        if self.vector_store_type == "qdrant":
+            if not QDRANT_AVAILABLE:
+                raise ImportError("Qdrant vector store not available")
+            
+            # Test connection before attempting to load
+            try:
+                self.qdrant_client.get_collections()
+            except Exception as e:
+                error_msg = (
+                    f"❌ Error: Qdrant is not responding when trying to load index.\n"
+                    f"   Host: {QDRANT_HOST}:{QDRANT_PORT}\n"
+                    f"   Collection: {collection_name}\n"
+                    f"   Error: {str(e)}\n"
+                    f"   Please ensure Qdrant is running and accessible."
+                )
+                raise ConnectionError(error_msg) from e
+            
+            return QdrantVectorStore(
+                client=self.qdrant_client,
+                collection_name=collection_name
+            )
+        elif self.vector_store_type == "chroma":
+            if not CHROMA_AVAILABLE:
+                raise ImportError("Chroma vector store not available")
+            
+            chroma_collection = self.chroma_client.get_collection(
+                name=collection_name
+            )
+            return ChromaVectorStore(chroma_collection=chroma_collection)
+        else:
+            raise ValueError(f"Unsupported vector_store_type: {self.vector_store_type}")
+    
+    def _delete_collection(self, collection_name: str) -> bool:
+        """
+        Delete a collection from the vector store.
+        
+        Args:
+            collection_name: Name of the collection to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if self.vector_store_type == "qdrant":
+                self.qdrant_client.delete_collection(collection_name=collection_name)
+                print(f"🗑️  Deleted Qdrant collection '{collection_name}'")
+                return True
+            elif self.vector_store_type == "chroma":
+                self.chroma_client.delete_collection(name=collection_name)
+                print(f"🗑️  Deleted Chroma collection '{collection_name}'")
+                return True
+            else:
+                return False
+        except Exception as e:
+            print(f"⚠️  Warning: Could not delete {self.vector_store_type} collection '{collection_name}': {e}")
+            return False
     
     def _load_state(self) -> Dict[str, Any]:
         """Load the state from file."""
@@ -327,10 +634,11 @@ class RAGDocumentStore(DocumentStore):
         return {
             "documents": {},
             "last_updated": None,
-            "total_documents": 0,
-            "indexed_documents": 0,
-            "failed_documents": 0,
-            "index_created": False
+            "total_pages": 0,
+            "indexed_pages": 0,
+            "failed_pages": 0,
+            "index_created": False,
+            "vector_store_type": None  # Track which vector store was used
         }
     
     def _save_state(self) -> None:
@@ -429,23 +737,24 @@ class RAGDocumentStore(DocumentStore):
         return deleted
     
     def _update_state_counters(self):
-        """Update aggregate counters in state."""
+        """Update aggregate counters in state (per page)."""
         documents = self.state.get("documents", {})
         
-        total = len(documents)
-        indexed = sum(1 for doc in documents.values() if doc.get("indexed", False))
-        failed = sum(1 for doc in documents.values() if not doc.get("indexed", False))
+        total_pages = sum(doc.get("page_count", 0) for doc in documents.values())
+        indexed_pages = sum(doc.get("page_count", 0) for doc in documents.values() if doc.get("indexed", False))
+        failed_pages = total_pages - indexed_pages
         
-        self.state["total_documents"] = total
-        self.state["indexed_documents"] = indexed
-        self.state["failed_documents"] = failed
+        self.state["total_pages"] = total_pages
+        self.state["indexed_pages"] = indexed_pages
+        self.state["failed_pages"] = failed_pages
     
-    def _mark_document_indexed(self, doc_path: Path, chunk_count: int):
+    def _mark_document_indexed(self, doc_path: Path, page_count: int, chunk_count: int):
         """
         Mark document as successfully indexed and save state.
         
         Args:
             doc_path: Path to the document
+            page_count: Number of pages in this document
             chunk_count: Number of chunks created from this document
         """
         file_path_str = str(doc_path)
@@ -456,6 +765,7 @@ class RAGDocumentStore(DocumentStore):
             "extension": doc_path.suffix.lower(),
             "indexed": True,
             "indexed_at": dt.now().isoformat(),
+            "page_count": page_count,
             "chunk_count": chunk_count
         }
         
@@ -502,24 +812,6 @@ class RAGDocumentStore(DocumentStore):
             del self.state["documents"][file_path]
             self._update_state_counters()
             self._save_state()
-    
-    def _needs_reindex(self) -> bool:
-        """Check if the index needs to be rebuilt."""
-        current_docs = self._scan_documents()
-        stored_docs = self.state.get("documents", {})
-        
-        # Check if any documents changed
-        for file_path, metadata in current_docs.items():
-            stored_metadata = stored_docs.get(file_path)
-            if not stored_metadata or stored_metadata.get("modified") != metadata["modified"]:
-                return True
-        
-        # Check if any documents were deleted
-        for file_path in stored_docs.keys():
-            if file_path not in current_docs:
-                return True
-        
-        return not self.state.get("index_created", False)
     
     def _extract_page_numbers_from_text(self, text: str) -> List[str]:
         """
@@ -576,8 +868,6 @@ class RAGDocumentStore(DocumentStore):
         files_with_markers = set()  # Track unique source files with markers
         files_without_markers = set()  # Track unique source files without markers
         
-        print(f"📑 Checking for page markers in {len(documents)} document(s)...")
-        
         for i, doc in enumerate(documents):
             # Only process if we're using LlamaParse
             if not self.llama_parse_parser:
@@ -586,12 +876,6 @@ class RAGDocumentStore(DocumentStore):
             
             # Check if this is a LlamaParse-supported file type
             file_path = doc.metadata.get('file_path') or doc.metadata.get('file_name', '')
-            
-            # DEBUG: Print metadata to see what's available
-            #if i == 0:  # Only print for first document
-            #    print(f"   DEBUG: Document metadata keys: {list(doc.metadata.keys())}")
-            #    print(f"   DEBUG: file_path={file_path}")
-            #    print(f"   DEBUG: Total documents from LlamaParse: {len(documents)}")
             
             file_ext = Path(str(file_path)).suffix.lower() if file_path else ''
             
@@ -610,9 +894,6 @@ class RAGDocumentStore(DocumentStore):
                 files_without_markers.add(file_path)
                 if i < 3:  # Only show first few
                     print(f"   ⚠️  No page markers found in document {i+1} from {Path(file_path).name}")
-                    # DEBUG: Show beginning of text to check if markers are there
-                    text_preview = text[:500].replace('\n', '\\n')
-                    print(f"   DEBUG: Text preview: {text_preview[:200]}...")
                 enriched_documents.append(doc)
                 continue
             
@@ -624,10 +905,8 @@ class RAGDocumentStore(DocumentStore):
         
         # Summary - count unique source files, not Document objects
         total_source_files = len(files_with_markers | files_without_markers)
-        if files_with_markers:
-            print(f"   ✅ {len(files_with_markers)}/{total_source_files} source files have page markers ({len(documents)} total document objects)")
-        else:
-            print(f"   ⚠️  No page markers found in any documents")
+        if not files_with_markers:
+            print(f"   ⚠️  No page markers found in the documents")
         
         return enriched_documents
     
@@ -640,7 +919,10 @@ class RAGDocumentStore(DocumentStore):
         
         This method:
         1. Extracts page numbers from each chunk's text
-        2. Sets page_label metadata (single page or range)
+        2. Sets page_label metadata according to rules:
+           - Single marker (N): use "N-N+1" (e.g., "5-6")
+           - Multiple markers (N to M): use "N-M" (e.g., "5-7")
+           - No markers: use page number from next chunk with markers
         3. Removes page markers from the text
         
         Args:
@@ -649,24 +931,64 @@ class RAGDocumentStore(DocumentStore):
         Returns:
             List of chunks with page_label metadata and clean text
         """
+        # First pass: extract page numbers and convert to integers for all nodes
+        page_numbers_by_node = []
         for node in nodes:
+            if not node.metadata.get('_has_page_markers'):
+                page_numbers_by_node.append(None)
+                continue
+            
+            # Extract page numbers from this chunk's text
+            page_str_list = self._extract_page_numbers_from_text(node.text)
+            
+            if page_str_list:
+                # Convert to integers and sort
+                page_ints = sorted([int(p) for p in page_str_list])
+                page_numbers_by_node.append(page_ints)
+            else:
+                page_numbers_by_node.append([])
+        
+        # Second pass: assign page labels and remove markers
+        for idx, node in enumerate(nodes):
             # Skip if this node didn't come from a document with page markers
             if not node.metadata.get('_has_page_markers'):
                 continue
             
-            # Extract page numbers from this chunk's text
-            page_numbers = self._extract_page_numbers_from_text(node.text)
+            page_numbers = page_numbers_by_node[idx]
+            
+            if page_numbers is None:
+                # Shouldn't happen, but skip if it does
+                continue
             
             if page_numbers:
-                # Set page_label metadata
-                if len(page_numbers) == 1:
-                    node.metadata['page_label'] = page_numbers[0]
-                else:
-                    # Chunk spans multiple pages - show as range
-                    node.metadata['page_label'] = f"{page_numbers[0]}-{page_numbers[-1]}"
+                # Chunk has page markers
+                first_page = page_numbers[0]
+                last_page = page_numbers[-1]
                 
-                # Remove page markers from text
-                node.text = self._remove_page_markers_from_text(node.text)
+                if len(page_numbers) == 1:
+                    # Single marker: use N-N+1 format
+                    node.metadata['page_label'] = f"{first_page}-{first_page + 1}"
+                else:
+                    # Multiple markers: use N-M format
+                    node.metadata['page_label'] = f"{first_page}-{last_page + 1}"
+            else:
+                # No page markers in this chunk - look ahead to next chunk with markers
+                next_page = None
+                for next_idx in range(idx + 1, len(nodes)):
+                    next_page_numbers = page_numbers_by_node[next_idx]
+                    if next_page_numbers:
+                        next_page = next_page_numbers[0]
+                        break
+                
+                if next_page is not None:
+                    # Use the page number from the next chunk
+                    node.metadata['page_label'] = str(next_page)
+                else:
+                    # No subsequent chunks with markers - leave empty
+                    node.metadata['page_label'] = None
+            
+            # Remove page markers from text
+            node.text = self._remove_page_markers_from_text(node.text)
             
             # Clean up internal marker
             node.metadata.pop('_has_page_markers', None)
@@ -720,126 +1042,290 @@ class RAGDocumentStore(DocumentStore):
                     f.write(doc.text)
                 
                 saved_count += 1
-                print(f"   ✅ Saved {markdown_filename}")
+                print(f"✅ Saved {markdown_filename}")
                 
             except Exception as e:
-                print(f"   ⚠️  Failed to save markdown for {file_path}: {e}")
+                print(f"⚠️  Failed to save markdown for {file_path}: {e}")
         
         if saved_count > 0:
             print(f"✅ Saved {saved_count} markdown file(s)")
     
-    def _load_single_document(self, doc_path: Path) -> List[Document]:
+    def _split_pdf_into_batches(self, file_bytes: bytes, batch_size: int = 20) -> List[Tuple[bytes, int]]:
         """
-        Load a single document using LlamaParse (async) or LlamaIndex (sync).
+        Split a PDF into batches of pages.
         
         Args:
-            doc_path: Path to the document
+            file_bytes: PDF file as bytes
+            batch_size: Number of pages per batch (default: 20)
             
         Returns:
-            List of Document objects
+            List of tuples (pdf_bytes, start_page) for each batch
         """
-        file_path_str = str(doc_path)
+        reader = PypdfReader(io.BytesIO(file_bytes))
+        total_pages = len(reader.pages)
         
-        # Try LlamaParse parsing first
-        if self.llama_parse_config and doc_path.suffix.lower() in LLAMAPARSE_SUPPORTED_EXTENSIONS:
-            try:
-                parser = self._create_llama_parse_parser(num_workers=1)
-                
-                async def parse_file():
-                    # Use async aparse - returns JobResult(s) quickly
-                    # When partition_pages is enabled, can return multiple JobResults (one per partition)
-                    result = await parser.aparse(file_path_str)
-                    
-                    if result is None:
-                        return []
-                    
-                    # Handle both single JobResult and list of JobResults (when partitioning)
-                    job_results = result if isinstance(result, list) else [result]
-                    
-                    # Collect all pages from all JobResults (partitions)
-                    all_pages = []
-                    for job_result in job_results:
-                        if hasattr(job_result, 'pages') and job_result.pages:
-                            all_pages.extend(job_result.pages)
-                    
-                    # Sort pages by page number to ensure correct ordering across partitions
-                    all_pages.sort(key=lambda p: p.page if hasattr(p, 'page') and p.page is not None else 0)
-                    
-                    # Reconstruct combined markdown from all pages
-                    if all_pages:
-                        combined_markdown_parts = []
-                        for page in all_pages:
-                            page_separator = f"<!-- PAGE: {page.page} -->\n"
-                            combined_markdown_parts.append(page_separator)
-                            # Handle None md (can happen in without_llm mode) - use text as fallback
-                            page_content = page.md if page.md is not None else (page.text if hasattr(page, 'text') and page.text else "")
-                            combined_markdown_parts.append(page_content)
-                            combined_markdown_parts.append("\n\n")
-                        
-                        combined_markdown = "".join(combined_markdown_parts)
-                        
-                        # Create Document object with reconstructed markdown
-                        doc = Document(
-                            text=combined_markdown,
-                            metadata={
-                                'file_path': file_path_str,
-                                'file_name': doc_path.name
-                            }
-                        )
-                        return [doc]
-                    
-                    return []
-                
-                try:
-                    documents = asyncio.run(parse_file())
-                except RuntimeError:
-                    # Already in event loop
-                    loop = asyncio.get_event_loop()
-                    documents = loop.run_until_complete(parse_file())
-                
-                return documents if documents else []
-                
-            except Exception as e:
-                print(f"   ⚠️  Parsing failed, falling back to sync: {e}")
-                # Fall through to sync parsing
+        if total_pages <= batch_size:
+            return [(file_bytes, 1)]
         
-        # Fall back to synchronous parsing
-        if self.llama_parse_parser:
-            file_extractor = {
-                ext: self.llama_parse_parser 
-                for ext in LLAMAPARSE_SUPPORTED_EXTENSIONS
-            }
-        else:
-            file_extractor = {".pdf": PDFReader()}
+        batches = []
+        for start_page in range(0, total_pages, batch_size):
+            writer = PdfWriter()
+            end_page = min(start_page + batch_size, total_pages)
+            
+            for page_num in range(start_page, end_page):
+                writer.add_page(reader.pages[page_num])
+            
+            batch_bytes = io.BytesIO()
+            writer.write(batch_bytes)
+            batch_bytes.seek(0)
+            batches.append((batch_bytes.getvalue(), start_page + 1))
         
-        reader = SimpleDirectoryReader(
-            input_files=[file_path_str],
-            file_extractor=file_extractor
-        )
-        
-        return reader.load_data()
+        return batches
     
-    def _add_document_to_index(self, doc_path: Path, status: str) -> bool:
+    async def _parse_bytes_and_reconstruct(self, file_bytes: bytes, file_path_str: str, doc_name: str) -> Tuple[Optional[Document], int]:
         """
-        Add a single document to the existing index.
+        Parse bytes using LlamaParse and reconstruct markdown with page markers.
+        
+        Args:
+            file_bytes: File content as bytes
+            file_path_str: Original file path (for metadata)
+            doc_name: Document name (for metadata)
+            
+        Returns:
+            Tuple of (Document object with reconstructed markdown, page_count), or (None, 0) if parsing failed
+        """
+        if not self.llama_parse_parser:
+            return None, 0
+        parser = self.llama_parse_parser
+        file_obj = io.BytesIO(file_bytes)
+        # LlamaParse requires extra_info with file_name when passing bytes
+        extra_info = {"file_name": doc_name}
+        result = await parser.aparse(file_obj, extra_info=extra_info)
+        
+        if result is None or not hasattr(result, 'pages') or not result.pages:
+            return None, 0
+        
+        page_count = len(result.pages)
+        
+        # Reconstruct markdown from pages with page markers at the bottom
+        combined_markdown_parts = []
+        for page in result.pages:
+            page_content = page.md if page.md is not None else (page.text if hasattr(page, 'text') and page.text else "")
+            combined_markdown_parts.append(page_content)
+            page_separator = f"\n<!-- PAGE: {page.page} -->\n"
+            combined_markdown_parts.append(page_separator)
+            combined_markdown_parts.append("\n")
+        
+        combined_markdown = "".join(combined_markdown_parts)
+        
+        doc = Document(
+            text=combined_markdown,
+            metadata={
+                'file_path': file_path_str,
+                'file_name': doc_name
+            }
+        )
+        return doc, page_count
+    
+    async def _process_single_document_async(self, doc_path: Path, status: str) -> Tuple[bool, int, int, Optional[str], float, float]:
+        """
+        Process a single document asynchronously: parse → chunk → embed → insert.
+        
+        This function handles the complete pipeline for one document:
+        - Parses the document (supports LlamaParse)
+        - Chunks the document into nodes
+        - Embeds and inserts nodes into index immediately
         
         Args:
             doc_path: Path to the document
             status: Document status ('new', 'modified', or 'failed')
             
         Returns:
-            True if successful, False if failed
+            Tuple of (success: bool, page_count: int, chunk_count: int, error: Optional[str], parsing_time: float, embedding_time: float)
         """
+        parsing_start = time.time()
+        embedding_start = 0.0
+        embedding_time = 0.0
+        page_count = 0
+        
         try:
-            status_emoji = "📥" if status == "new" else "🔄" if status == "modified" else "🔁"
-            print(f"{status_emoji} Processing {doc_path.name} ({status})...")
+            file_path_str = str(doc_path)
+            documents = []
             
-            # Load single document
-            documents = self._load_single_document(doc_path)
+            # Parse document using LlamaParse if available
+            if self.llama_parse_config and doc_path.suffix.lower() in LLAMAPARSE_SUPPORTED_EXTENSIONS:
+                try:
+                    # Check if this is a PDF and we should split it
+                    if doc_path.suffix.lower() == '.pdf':
+                        # Read PDF file as bytes
+                        with open(doc_path, 'rb') as f:
+                            file_bytes = f.read()
+                        
+                        # Split into 20-page batches
+                        PAGE_BATCH_SIZE = 20
+                        batches = self._split_pdf_into_batches(file_bytes, batch_size=PAGE_BATCH_SIZE)
+                        
+                        if len(batches) > 1:
+                            print(f"   📄 Splitting PDF into {len(batches)} batch(es) of up to {PAGE_BATCH_SIZE} pages")
+                            
+                            # Parse all batches concurrently
+                            async def parse_batch(batch_bytes: bytes, start_page: int, batch_idx: int) -> Tuple[Optional[Any], int]:
+                                """Parse a single PDF batch directly from bytes."""
+                                # Pass bytes directly to LlamaParse (no disk I/O needed)
+                                if not self.llama_parse_parser:
+                                    return None, start_page
+                                parser = self.llama_parse_parser
+                                # Create a file-like object from bytes for LlamaParse
+                                file_obj = io.BytesIO(batch_bytes)
+                                # LlamaParse requires extra_info with file_name when passing bytes
+                                # Use batch-specific filename to help identify the batch
+                                batch_filename = f"{doc_path.stem}_batch{batch_idx + 1}.pdf"
+                                extra_info = {"file_name": batch_filename}
+                                # Use aparse with bytes/file-like object
+                                result = await parser.aparse(file_obj, extra_info=extra_info)
+                                return result, start_page
+                            
+                            # Parse all batches concurrently
+                            results = await asyncio.gather(*[
+                                parse_batch(batch_bytes, start_page, idx)
+                                for idx, (batch_bytes, start_page) in enumerate(batches)
+                            ], return_exceptions=True)
+                            
+                            # Collect all pages from all batches, adjusting page numbers
+                            all_pages = []
+                            failed_batches = []
+                            
+                            for idx, result_data in enumerate(results):
+                                if isinstance(result_data, Exception):
+                                    failed_batches.append(f"Batch {idx + 1}: {result_data}")
+                                    continue
+                                
+                                result, start_page = result_data
+                                
+                                if result is None or not hasattr(result, 'pages') or not result.pages:
+                                    failed_batches.append(f"Batch {idx + 1}: No pages")
+                                    continue
+                                
+                                # Adjust page numbers to absolute page numbers
+                                for page in result.pages:
+                                    # Page numbers from LlamaParse are relative to the batch (1-N)
+                                    # We need to convert to absolute page numbers
+                                    if hasattr(page, 'page') and page.page is not None:
+                                        # Adjust: batch page 1 -> absolute page (start_page)
+                                        # batch page 2 -> absolute page (start_page + 1), etc.
+                                        absolute_page = start_page + (page.page - 1)
+                                        # Store absolute page number for later use
+                                        page._absolute_page = absolute_page
+                                    all_pages.append(page)
+                            
+                            if failed_batches:
+                                print(f"   ⚠️  {len(failed_batches)} batch(es) failed: {failed_batches[:3]}")
+                                if len(failed_batches) > 3:
+                                    print(f"      ... and {len(failed_batches) - 3} more")
+                            
+                            if not all_pages:
+                                parsing_time = time.time() - parsing_start
+                                return False, 0, 0, "No pages extracted from any batches", parsing_time, 0.0
+                            
+                            page_count = len(all_pages)
+                            
+                            # Sort pages by absolute page number
+                            all_pages.sort(key=lambda p: getattr(p, '_absolute_page', p.page if hasattr(p, 'page') and p.page is not None else 0))
+                            
+                            # Reconstruct markdown with page markers at the bottom using absolute page numbers
+                            combined_markdown_parts = []
+                            for page in all_pages:
+                                # Use absolute page number if available, otherwise use original
+                                page_num = getattr(page, '_absolute_page', page.page if hasattr(page, 'page') and page.page is not None else 0)
+                                page_content = page.md if page.md is not None else (page.text if hasattr(page, 'text') and page.text else "")
+                                combined_markdown_parts.append(page_content)
+                                page_separator = f"\n<!-- PAGE: {page_num} -->\n"
+                                combined_markdown_parts.append(page_separator)
+                                combined_markdown_parts.append("\n")
+                            
+                            combined_markdown = "".join(combined_markdown_parts)
+                            
+                            doc = Document(
+                                text=combined_markdown,
+                                metadata={
+                                    'file_path': file_path_str,
+                                    'file_name': doc_path.name
+                                }
+                            )
+                            documents = [doc]
+                        else:
+                            # Single batch - parse from bytes
+                            batch_bytes, start_page = batches[0]
+                            doc, page_count = await self._parse_bytes_and_reconstruct(batch_bytes, file_path_str, doc_path.name)
+                            if doc is None:
+                                parsing_time = time.time() - parsing_start
+                                return False, 0, 0, "No content extracted from LlamaParse", parsing_time, 0.0
+                            documents = [doc]
+                    else:
+                        # Non-PDF document - read as bytes and parse
+                        with open(doc_path, 'rb') as f:
+                            file_bytes = f.read()
+                        
+                        doc, page_count = await self._parse_bytes_and_reconstruct(file_bytes, file_path_str, doc_path.name)
+                        if doc is None:
+                            parsing_time = time.time() - parsing_start
+                            return False, 0, 0, "No content extracted from LlamaParse", parsing_time, 0.0
+                        documents = [doc]
+                        
+                except Exception as e:
+                    # Log the error for debugging
+                    error_details = str(e)
+                    if hasattr(e, '__cause__') and e.__cause__:
+                        error_details += f" (caused by: {e.__cause__})"
+                    print(f"   ⚠️  LlamaParse async parsing failed: {error_details}")
+                    
+                    # Fall back to sync parsing
+                    try:
+                        if self.llama_parse_parser:
+                            file_extractor = {
+                                ext: self.llama_parse_parser 
+                                for ext in LLAMAPARSE_SUPPORTED_EXTENSIONS
+                            }
+                        else:
+                            file_extractor = {".pdf": PDFReader()}
+                        
+                        reader = SimpleDirectoryReader(
+                            input_files=[file_path_str],
+                            file_extractor=file_extractor
+                        )
+                        documents = reader.load_data()
+                        # For sync-parsed documents, estimate page count from document text length
+                        # (rough estimate: ~2000 chars per page)
+                        if documents:
+                            total_chars = sum(len(doc.text) for doc in documents)
+                            page_count = max(1, total_chars // 2000)
+                    except Exception as sync_error:
+                        parsing_time = time.time() - parsing_start
+                        return False, 0, 0, f"Parsing failed (async: {e}, sync: {sync_error})", parsing_time, 0.0
+            
+            else:
+                # Non-LlamaParse document - use sync parsing
+                try:
+                    file_extractor = {".pdf": PDFReader()} if doc_path.suffix.lower() == '.pdf' else None
+                    reader = SimpleDirectoryReader(
+                        input_files=[file_path_str],
+                        file_extractor=file_extractor
+                    )
+                    documents = reader.load_data()
+                    # For non-LlamaParse documents, estimate page count from document text length
+                    # (rough estimate: ~2000 chars per page)
+                    if documents:
+                        total_chars = sum(len(doc.text) for doc in documents)
+                        page_count = max(1, total_chars // 2000)
+                except Exception as e:
+                    parsing_time = time.time() - parsing_start
+                    return False, 0, 0, f"Sync parsing failed: {e}", parsing_time, 0.0
+            
+            # Parsing complete
+            parsing_time = time.time() - parsing_start
             
             if not documents:
-                self._mark_document_failed(doc_path, "No content extracted")
-                return False
+                return False, page_count, 0, "No content extracted", parsing_time, 0.0
             
             # Save markdown if enabled
             if self.store_md:
@@ -860,363 +1346,132 @@ class RAGDocumentStore(DocumentStore):
             if self.llama_parse_parser:
                 nodes = self._post_process_nodes_with_page_ranges(nodes)
             
-            # Add nodes to existing index (or create if first document) with rate limiting
+            if not nodes:
+                return False, page_count, 0, "No nodes created from document", parsing_time, 0.0
+            
+            # Insert nodes into index immediately (per-document insertion)
+            # Track embedding time
+            embedding_start = time.time()
             create_new = not self.index
-            self._insert_nodes_with_rate_limiting(nodes, create_new_index=create_new)
+            
+            try:
+                if create_new:
+                    # Create index with first document
+                    collection_name = f"{self.collection}_vectors"
+                    vector_store = self._create_vector_store(collection_name)
+                    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                    self.index = VectorStoreIndex(nodes=nodes, storage_context=storage_context)
+                    self.state["index_created"] = True
+                    # Store vector store type for tracking
+                    self.state["vector_store_type"] = self.vector_store_type
+                    self._save_state()
+                else:
+                    # Insert into existing index
+                    self.index.insert_nodes(nodes)
+            except Exception as index_error:
+                # If index creation failed (e.g., race condition), try inserting instead
+                if create_new:
+                    # Another document may have created the index, try inserting
+                    if self.index:
+                        self.index.insert_nodes(nodes)
+                    else:
+                        raise
+                else:
+                    raise
+            
+            embedding_time = time.time() - embedding_start
             
             # Update state for this document
-            self._mark_document_indexed(doc_path, len(nodes))
+            self._mark_document_indexed(doc_path, page_count, len(nodes))
             
-            print(f"✅ Indexed {doc_path.name} ({len(nodes)} chunks)")
-            return True
+            return True, page_count, len(nodes), None, parsing_time, embedding_time
             
         except Exception as e:
-            print(f"❌ Failed to index {doc_path.name}: {e}")
-            import traceback
-            traceback.print_exc()
-            self._mark_document_failed(doc_path, str(e))
-            return False
+            error_msg = str(e)
+            parsing_time = time.time() - parsing_start
+            self._mark_document_failed(doc_path, error_msg)
+            return False, page_count, 0, error_msg, parsing_time, embedding_time
     
-    def _process_documents_parallel(self, documents: List[Tuple[Path, str]]) -> Tuple[List[Any], List[Tuple[Path, int]], List[Tuple[Path, str]]]:
+    def _process_documents_parallel(self, documents: List[Tuple[Path, str]]) -> Tuple[List[Any], List[Tuple[Path, int, int]], List[Tuple[Path, str]]]:
         """
-        Process all documents in parallel and return nodes.
+        Process all documents in batches with concurrent processing per batch.
         
-        Uses asyncio.gather() to parse multiple files concurrently for maximum performance.
-        All nodes are collected together for efficient batch embedding insertion.
+        Documents are split into batches of DOCUMENT_BATCH_SIZE. For each batch,
+        documents are processed concurrently: parse → chunk → embed → insert.
         
         Args:
             documents: List of (doc_path, status) tuples to process
             
         Returns:
             Tuple of (all_nodes, successful_docs, failed_docs)
-            - all_nodes: All nodes from successfully parsed documents
-            - successful_docs: List of (doc_path, chunk_count) tuples
+            - all_nodes: Always empty list (nodes are inserted immediately per document, not collected)
+            - successful_docs: List of (doc_path, page_count, chunk_count) tuples
             - failed_docs: List of (doc_path, error_message) tuples
         """
-        all_nodes = []
         successful = []
         failed = []
         
         if not documents:
-            return all_nodes, successful, failed
+            return [], successful, failed
         
-        # Group by file type for processing
-        if self.llama_parse_config:
-            llama_parse_docs = [
-                (doc_path, status) for doc_path, status in documents
-                if doc_path.suffix.lower() in LLAMAPARSE_SUPPORTED_EXTENSIONS
+        # Split documents into batches
+        batch_size = DOCUMENT_BATCH_SIZE
+        batches = []
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i + batch_size]
+            batches.append(batch)
+        
+        print(f"   📦 Processing {len(documents)} document(s) in {len(batches)} batch(es) of up to {batch_size} document(s) each")
+        
+        # Process each batch concurrently
+        async def process_batch(batch: List[Tuple[Path, str]]):
+            """Process a batch of documents concurrently."""
+            tasks = [
+                self._process_single_document_async(doc_path, status)
+                for doc_path, status in batch
             ]
-            other_docs = [
-                (doc_path, status) for doc_path, status in documents
-                if doc_path.suffix.lower() not in LLAMAPARSE_SUPPORTED_EXTENSIONS
-            ]
-            
-            # Process LlamaParse-supported documents using batch API calls
-            if llama_parse_docs:
-                try:
-                    # Create parser with configured number of workers
-                    parser = self._create_llama_parse_parser(num_workers=LLAMA_PARSE_NUM_WORKERS)
-                    
-                    # Split documents into batches
-                    # When partition_pages is enabled, process files one at a time to avoid
-                    # confusion with multiple JobResults per file
-                    if LLAMA_PARSE_PARTITION_PAGES is not None:
-                        # Partitioning enabled: process one file per batch to reliably handle multiple JobResults
-                        batch_size = 1
-                        print(f"   ℹ️  Partitioning enabled: processing files one at a time")
-                    else:
-                        # No partitioning: can batch multiple files (batch size = num_workers)
-                        batch_size = LLAMA_PARSE_NUM_WORKERS
-                    
-                    batches = []
-                    for i in range(0, len(llama_parse_docs), batch_size):
-                        batch = llama_parse_docs[i:i + batch_size]
-                        batches.append(batch)
-                    
-                    print(f"   📦 Processing {len(llama_parse_docs)} file(s) in {len(batches)} batch(es) of up to {batch_size} file(s) each")
-                    
-                    async def parse_batch(batch: List[Tuple[Path, str]]):
-                        """Parse a batch of files using batch API call (aparse with list)."""
-                        try:
-                            # Extract file paths from batch
-                            file_paths = [str(doc_path) for doc_path, _ in batch]
-                            file_info = [(doc_path, status) for doc_path, status in batch]
-                            
-                            # Use batch API call: aparse([file1, file2, ...])
-                            result = await parser.aparse(file_paths)
-                            
-                            if result is None:
-                                print(f"   ⚠️  Batch aparse returned None for {len(batch)} file(s)")
-                                return [(doc_path, status, []) for doc_path, status in batch]
-                            
-                            batch_documents = []
-                            
-                            # Batch API returns a list of JobResults
-                            # When partition_pages is enabled, one file can produce multiple JobResults (one per partition)
-                            if isinstance(result, list):
-                                # Check if partitioning is enabled (multiple JobResults expected per file)
-                                partition_enabled = LLAMA_PARSE_PARTITION_PAGES is not None
-                                if not partition_enabled and len(result) != len(batch):
-                                    print(f"   ⚠️  Batch returned {len(result)} JobResult(s), expected {len(batch)} (partitioning disabled)")
-                                elif partition_enabled:
-                                    print(f"   ℹ️  Batch returned {len(result)} JobResult(s) for {len(batch)} file(s) (partitioning enabled)")
-                                
-                                # Group JobResults by source file
-                                # When partitioning is enabled, multiple JobResults belong to one file
-                                # The API maintains order: [file1_part1, file1_part2, ..., file2_part1, ...]
-                                result_index = 0
-                                for file_idx, (doc_path, status) in enumerate(file_info):
-                                    if result_index >= len(result):
-                                        print(f"   ⚠️  Not enough JobResults for {doc_path.name}")
-                                        batch_documents.append((doc_path, status, []))
-                                        continue
-                                    
-                                    try:
-                                        # Collect all JobResults for this file
-                                        # When partitioning is enabled, batch_size is set to 1, so all JobResults
-                                        # in the result list belong to this single file
-                                        file_documents = []
-                                        all_pages = []
-                                        
-                                        if partition_enabled:
-                                            # Partitioning enabled: all JobResults belong to this file
-                                            # Collect all remaining JobResults
-                                            file_job_results = result[result_index:]
-                                            result_index = len(result)  # Consume all
-                                        else:
-                                            # No partitioning: one JobResult per file
-                                            file_job_results = [result[result_index]] if result_index < len(result) else []
-                                            result_index += 1
-                                        
-                                        # Process all JobResults for this file and combine their pages
-                                        for job_result in file_job_results:
-                                            if hasattr(job_result, 'pages') and job_result.pages:
-                                                all_pages.extend(job_result.pages)
-                                        
-                                        # Sort pages by page number to ensure correct ordering across partitions
-                                        all_pages.sort(key=lambda p: p.page if hasattr(p, 'page') and p.page is not None else 0)
-                                        
-                                        # Reconstruct combined markdown from all pages
-                                        if all_pages:
-                                            combined_markdown_parts = []
-                                            for page in all_pages:
-                                                page_separator = f"<!-- PAGE: {page.page} -->\n"
-                                                combined_markdown_parts.append(page_separator)
-                                                # Handle None md (can happen in without_llm mode) - use text as fallback
-                                                page_content = page.md if page.md is not None else (page.text if hasattr(page, 'text') and page.text else "")
-                                                combined_markdown_parts.append(page_content)
-                                                combined_markdown_parts.append("\n\n")
-                                            
-                                            combined_markdown = "".join(combined_markdown_parts)
-                                            
-                                            # Create Document object with reconstructed markdown
-                                            doc = Document(
-                                                text=combined_markdown,
-                                                metadata={
-                                                    'file_path': file_paths[file_idx] if file_idx < len(file_paths) else None,
-                                                    'file_name': doc_path.name
-                                                }
-                                            )
-                                            file_documents.append(doc)
-                                        
-                                        batch_documents.append((doc_path, status, file_documents))
-                                        
-                                    except Exception as e:
-                                        print(f"   ⚠️  Error extracting documents for {doc_path.name}: {e}")
-                                        import traceback
-                                        traceback.print_exc()
-                                        batch_documents.append((doc_path, status, []))
-                                
-                                # Warn if we didn't process all JobResults
-                                if result_index < len(result):
-                                    print(f"   ⚠️  Processed {result_index} JobResult(s), but {len(result)} were returned")
-                            else:
-                                # Unexpected result type
-                                print(f"   ⚠️  Unexpected batch result type: {type(result)}")
-                                for doc_path, status in batch:
-                                    batch_documents.append((doc_path, status, []))
-                            
-                            return batch_documents
-                            
-                        except Exception as e:
-                            print(f"   ⚠️  Batch parse failed: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            return [(doc_path, status, []) for doc_path, status in batch]
-                    
-                    # Process all batches
-                    async def parse_all_batches():
-                        # Process batches sequentially (can be parallelized later if needed)
-                        all_results = []
-                        for batch in batches:
-                            batch_results = await parse_batch(batch)
-                            all_results.extend(batch_results)
-                        return all_results
-                    
-                    try:
-                        results = asyncio.run(parse_all_batches())
-                    except RuntimeError as e:
-                        if "asyncio.run() cannot be called from a running event loop" in str(e):
-                            loop = asyncio.get_event_loop()
-                            results = loop.run_until_complete(parse_all_batches())
-                        else:
-                            raise
-                    
-                    # Process results and collect documents with per-file tracking
-                    documents_by_file = {}
-                    failed_paths = set()
-                    successful_parses = 0
-                    
-                    for doc_path, status, file_docs in results:
-                        if file_docs:
-                            documents_by_file[doc_path] = (status, file_docs)
-                            successful_parses += 1
-                        else:
-                            print(f"   ⚠️  No documents returned for {doc_path.name}")
-                    
-                    if documents_by_file:
-                        # Collect all documents
-                        all_documents = []
-                        for doc_path, (status, file_docs) in documents_by_file.items():
-                            all_documents.extend(file_docs)
-                        
-                        print(f"   📊 LlamaParse parsed {successful_parses}/{len(llama_parse_docs)} files, returned {len(all_documents)} document object(s)")
-                        
-                        # Process nodes from all documents together
-                        node_parser = SentenceSplitter(
-                            chunk_size=self.chunk_size,
-                            chunk_overlap=self.chunk_overlap
-                        )
-                        
-                        # Save markdown if enabled
-                        if self.store_md:
-                            self._save_markdowns(all_documents)
-                        
-                        # Enrich with page metadata
-                        all_documents = self._enrich_documents_with_page_metadata(all_documents)
-                        
-                        # Create nodes from all documents
-                        nodes = node_parser.get_nodes_from_documents(all_documents)
-                        nodes = self._post_process_nodes_with_page_ranges(nodes)
-                        
-                        # Calculate nodes per document for tracking
-                        nodes_per_file = {}
-                        if nodes and documents_by_file:
-                            # Approximate: divide nodes evenly, or could track more precisely
-                            avg_nodes_per_doc = len(nodes) / len(documents_by_file)
-                            for doc_path in documents_by_file.keys():
-                                nodes_per_file[doc_path] = int(avg_nodes_per_doc)
-                        
-                        all_nodes.extend(nodes)
-                        
-                        # Track successful documents with chunk counts
-                        for doc_path, (status, _) in documents_by_file.items():
-                            chunk_count = nodes_per_file.get(doc_path, 0)
-                            successful.append((doc_path, chunk_count))
-                        
-                        # Track failed documents (only those not already tracked and not in documents_by_file)
-                        for doc_path, status in llama_parse_docs:
-                            if doc_path not in documents_by_file and doc_path not in failed_paths:
-                                failed.append((doc_path, "No content extracted"))
-                    else:
-                        # All parsing failed
-                        print(f"   ⚠️  LlamaParse returned no documents for {len(llama_parse_docs)} file(s)")
-                        print(f"      This might be due to parse_mode='{LLAMA_PARSE_PARSE_MODE}'")
-                        # Track documents that weren't already marked as failed
-                        for doc_path, status in llama_parse_docs:
-                            if doc_path not in failed_paths:
-                                failed.append((doc_path, "LlamaParse returned no documents"))
-                        
-                except Exception as e:
-                    # If parallel async parsing fails, fall back to processing documents individually
-                    print(f"   ⚠️  Parallel async parsing failed, falling back to individual processing: {e}")
-                    for doc_path, status in llama_parse_docs:
-                        try:
-                            # _load_single_document already handles fallback to sync parsing
-                            if self._add_document_to_index(doc_path, status):
-                                # Chunk count will be updated by _add_document_to_index
-                                successful.append((doc_path, 0))
-                            else:
-                                failed.append((doc_path, "Processing failed"))
-                        except Exception as doc_error:
-                            failed.append((doc_path, str(doc_error)))
-            
-            # Process other documents (non-LlamaParse) individually
-            for doc_path, status in other_docs:
-                try:
-                    if self._add_document_to_index(doc_path, status):
-                        successful.append((doc_path, 0))
-                    else:
-                        failed.append((doc_path, "Processing failed"))
-                except Exception as e:
-                    failed.append((doc_path, str(e)))
-        else:
-            # No LlamaParse - process all documents individually
-            for doc_path, status in documents:
-                try:
-                    if self._add_document_to_index(doc_path, status):
-                        successful.append((doc_path, 0))
-                    else:
-                        failed.append((doc_path, "Processing failed"))
-                except Exception as e:
-                    failed.append((doc_path, str(e)))
+            return await asyncio.gather(*tasks)
         
-        return all_nodes, successful, failed
-    
-    def _insert_nodes_with_rate_limiting(self, nodes: List[Any], create_new_index: bool = False) -> None:
-        """
-        Insert nodes into the index with rate limiting to avoid embedding API limits.
+        # Process all batches
+        async def process_all_batches():
+            """Process all batches sequentially (batches are processed sequentially, documents within batch concurrently)."""
+            all_results = []
+            for batch_num, batch in enumerate(batches, 1):
+                if len(batches) > 1:
+                    print(f"   Processing batch {batch_num}/{len(batches)} ({len(batch)} document(s))...")
+                batch_results = await process_batch(batch)
+                all_results.extend(batch_results)
+            return all_results
         
-        Processes nodes in smaller batches with delays between batches to respect
-        Azure OpenAI rate limits.
-        
-        Args:
-            nodes: List of nodes to insert
-            create_new_index: If True, creates a new index; otherwise inserts into existing
-        """
-        if not nodes:
-            return
-        
-        total_nodes = len(nodes)
-        batch_size = MAX_NODES_PER_BATCH
-        num_batches = (total_nodes + batch_size - 1) // batch_size
-        
-        if num_batches > 1:
-            print(f"   📊 Inserting {total_nodes} nodes in {num_batches} batches of ~{batch_size} to respect rate limits...")
-        
-        for i in range(0, total_nodes, batch_size):
-            batch_nodes = nodes[i:i+batch_size]
-            batch_num = (i // batch_size) + 1
-            
-            if num_batches > 1:
-                print(f"      Batch {batch_num}/{num_batches}: embedding {len(batch_nodes)} nodes...", end=" ", flush=True)
-            
-            try:
-                if create_new_index and i == 0:
-                    # Create index with first batch
-                    chroma_collection = self.chroma_client.get_or_create_collection(
-                        name=f"{self.collection}_vectors"
-                    )
-                    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-                    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-                    self.index = VectorStoreIndex(nodes=batch_nodes, storage_context=storage_context)
-                    self.state["index_created"] = True
-                else:
-                    # Insert into existing index
-                    self.index.insert_nodes(batch_nodes)
-                
-                if num_batches > 1:
-                    print("✓")
-                
-                # Add delay between batches (except for last batch)
-                if i + batch_size < total_nodes and EMBEDDING_DELAY_SECONDS > 0:
-                    time.sleep(EMBEDDING_DELAY_SECONDS)
-                    
-            except Exception as e:
-                if num_batches > 1:
-                    print(f"✗ Error: {e}")
+        try:
+            results = asyncio.run(process_all_batches())
+        except RuntimeError as e:
+            if "asyncio.run() cannot be called from a running event loop" in str(e):
+                loop = asyncio.get_event_loop()
+                results = loop.run_until_complete(process_all_batches())
+            else:
                 raise
-    
+        
+        # Process results and aggregate timing
+        total_parsing_time = 0.0
+        total_embedding_time = 0.0
+        
+        for (doc_path, status), result in zip(documents, results):
+            success, page_count, chunk_count, error, parsing_time, embedding_time = result
+            if success:
+                successful.append((doc_path, page_count, chunk_count))
+                total_parsing_time += parsing_time
+                total_embedding_time += embedding_time
+            else:
+                failed.append((doc_path, error or "Unknown error"))
+                total_parsing_time += parsing_time
+        
+        # Store aggregated timing for use in update_documents
+        self._last_parsing_time = total_parsing_time
+        self._last_embedding_time = total_embedding_time
+        
+        # Return empty nodes list since nodes are inserted immediately per document
+        return [], successful, failed
     
     def update_documents(self) -> bool:
         """
@@ -1229,60 +1484,59 @@ class RAGDocumentStore(DocumentStore):
         - Progressive state updates
         """
         try:
-            overall_start = time.time()
             print(f"🔄 Updating RAG index for collection '{self.collection}'...")
             
             # Phase 1: Scan for documents
             print(f"\n📁 Phase 1/6: Scanning directory...")
-            scan_start = time.time()
             current_docs = self._scan_documents()
             
             if not current_docs:
                 print(f"⚠️  No documents found in {self.documents_dir}")
                 return True
             
-            scan_elapsed = time.time() - scan_start
-            print(f"✅ Scanned directory ({scan_elapsed:.1f}s)")
+            print(f"✅ Scanned directory")
             
             # Phase 2: Load existing index
             print(f"\n📖 Phase 2/6: Loading existing index...")
-            load_start = time.time()
+            
+            # Check if vector store type changed (migration scenario)
+            stored_vector_store_type = self.state.get("vector_store_type")
+            if stored_vector_store_type and stored_vector_store_type != self.vector_store_type:
+                print(f"   ⚠️  Vector store type changed from {stored_vector_store_type} to {self.vector_store_type}")
+                print(f"   ⚠️  Documents will be re-indexed into the new vector store")
+                # Clear index_created flag to force re-indexing
+                self.state["index_created"] = False
+                # Mark all documents as needing re-indexing
+                for doc_path in self.state.get("documents", {}):
+                    self.state["documents"][doc_path]["indexed"] = False
+                self._save_state()
             
             if self.state.get("index_created", False) and not self.index:
                 try:
-                    chroma_collection = self.chroma_client.get_collection(
-                        name=f"{self.collection}_vectors"
-                    )
-                    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+                    collection_name = f"{self.collection}_vectors"
+                    vector_store = self._get_vector_store_for_loading(collection_name)
                     self.index = VectorStoreIndex.from_vector_store(vector_store)
-                    load_elapsed = time.time() - load_start
-                    print(f"✅ Loaded existing index ({load_elapsed:.1f}s)")
+                    print(f"✅ Loaded existing index")
                 except Exception as e:
                     print(f"   ⚠️  No existing index found, will create new one")
                     self.index = None
-                    load_elapsed = time.time() - load_start
             else:
-                load_elapsed = time.time() - load_start
                 print(f"   No existing index to load")
             
             # Phase 3: Identify documents to process
             print(f"\n🔍 Phase 3/6: Identifying documents to process...")
-            identify_start = time.time()
             
             to_process = self._get_documents_to_process()
             deleted = self._get_deleted_documents()
             
-            identify_elapsed = time.time() - identify_start
-            
             # Check if everything is up to date
             if not to_process and not deleted:
-                indexed_count = self.state.get("indexed_documents", 0)
-                print(f"✅ Index is up to date ({indexed_count} documents indexed)")
-                print(f"\n⏱️  Total time: {time.time() - overall_start:.1f}s")
+                indexed_count = self.state.get("indexed_pages", 0)
+                print(f"✅ Index is up to date ({indexed_count} pages indexed)")
                 return True
             
             # Summary
-            print(f"📊 Found {len(current_docs)} total documents ({identify_elapsed:.1f}s):")
+            print(f"📊 Found {len(current_docs)} total documents:")
             if to_process:
                 new_count = sum(1 for _, status in to_process if status == 'new')
                 modified_count = sum(1 for _, status in to_process if status == 'modified')
@@ -1298,86 +1552,60 @@ class RAGDocumentStore(DocumentStore):
             
             # Phase 4: Process all documents in parallel
             print(f"\n📦 Phase 4/6: Processing documents...")
-            process_start = time.time()
             
             print(f"   Processing {len(to_process)} document(s) concurrently")
             
-            # Process all documents in parallel (parsing phase)
-            parsing_start = time.time()
+            # Process all documents in parallel (parsing + embedding happen per-document)
             all_nodes, successful_docs, failed_docs = self._process_documents_parallel(to_process)
-            parsing_elapsed = time.time() - parsing_start
             
-            # Insert all nodes together with rate limiting for embedding efficiency (embedding phase)
-            embedding_elapsed = 0.0
-            if all_nodes:
-                embedding_start = time.time()
-                create_new = not self.index
-                self._insert_nodes_with_rate_limiting(all_nodes, create_new_index=create_new)
-                embedding_elapsed = time.time() - embedding_start
+            # Get aggregated timing from _process_documents_parallel
+            parsing_elapsed = getattr(self, '_last_parsing_time', 0.0)
+            embedding_elapsed = getattr(self, '_last_embedding_time', 0.0)
             
-            # Update state for successful documents
-            successful_count = 0
-            for doc_path, chunk_count in successful_docs:
-                self._mark_document_indexed(doc_path, chunk_count)
-                successful_count += 1
+            # Update state for successful documents (already updated in _process_single_document_async)
+            successful_pages = sum(page_count for _, page_count, _ in successful_docs)
+            successful_count = len(successful_docs)
             
             # Update state for failed documents
             failed_count = len(failed_docs)
             for doc_path, error in failed_docs:
-                self._mark_document_failed(doc_path, error)
+                # State already updated in _process_single_document_async
+                pass
             
-            process_elapsed = time.time() - process_start
-            print(f"\n✅ Processed {len(to_process)} documents ({process_elapsed:.1f}s)")
-            print(f"   📊 Processing breakdown:")
-            print(f"      • Parsing: {parsing_elapsed:.1f}s")
-            print(f"      • Embedding: {embedding_elapsed:.1f}s")
-            if len(to_process) > 0:
-                parsing_per_doc = parsing_elapsed / len(to_process) if parsing_elapsed > 0 else 0
-                embedding_per_doc = embedding_elapsed / len(to_process) if embedding_elapsed > 0 else 0
-                print(f"   ⏱️  Speed: {parsing_per_doc:.1f}s/doc (parsing), {embedding_per_doc:.1f}s/doc (embedding)")
-            print(f"   • Successfully indexed: {successful_count}")
-            if failed_count > 0:
-                print(f"   • Failed: {failed_count}")
+            print(f"\n✅ Processed {len(to_process)} documents")
             
             # Phase 5: Handle deleted documents
             if deleted:
                 print(f"\n🗑️  Phase 5/6: Removing deleted documents...")
-                delete_start = time.time()
                 
                 for deleted_path in deleted:
                     print(f"   Removing {Path(deleted_path).name} from state...")
                     self._remove_document_from_state(deleted_path)
                 
-                delete_elapsed = time.time() - delete_start
-                print(f"✅ Removed {len(deleted)} document(s) ({delete_elapsed:.1f}s)")
+                print(f"✅ Removed {len(deleted)} document(s)")
             else:
                 print(f"\n   Phase 5/6: No deleted documents")
-                delete_elapsed = 0
             
             # Phase 6: Final summary
             print(f"\n🎉 Phase 6/6: Update complete!")
-            print(f"   • Successfully processed: {successful_count}")
+            print(f"   • Successfully indexed: {successful_pages} pages ({successful_count} documents)")
             if failed_count > 0:
-                print(f"   • Failed: {failed_count}")
+                print(f"   • Failed: {failed_count} documents")
             if deleted:
                 print(f"   • Removed: {len(deleted)}")
             
-            indexed_count = self.state.get("indexed_documents", 0)
-            total_count = self.state.get("total_documents", 0)
-            print(f"   • Total in collection: {indexed_count}/{total_count} indexed")
+            indexed_count = self.state.get("indexed_pages", 0)
+            total_count = self.state.get("total_pages", 0)
+            print(f"   • Total in collection: {indexed_count}/{total_count} pages indexed")
             
-            # Overall timing summary
-            overall_elapsed = time.time() - overall_start
-            print(f"\n⏱️  Total time: {overall_elapsed:.1f}s")
-            print(f"   📊 Time breakdown:")
-            print(f"      • Scanning: {scan_elapsed:.1f}s")
-            print(f"      • Loading index: {load_elapsed:.1f}s")
-            print(f"      • Identifying changes: {identify_elapsed:.1f}s")
-            print(f"      • Processing docs: {process_elapsed:.1f}s")
-            print(f"         - Parsing: {parsing_elapsed:.1f}s")
-            print(f"         - Embedding: {embedding_elapsed:.1f}s")
-            if delete_elapsed > 0:
-                print(f"      • Removing deleted: {delete_elapsed:.1f}s")
+            # Timing summary (only parsing and embedding)
+            print(f"\n⏱️  Timing:")
+            print(f"   • Parsing: {parsing_elapsed:.1f}s")
+            print(f"   • Embedding: {embedding_elapsed:.1f}s")
+            if successful_pages > 0:
+                parsing_per_page = parsing_elapsed / successful_pages if parsing_elapsed > 0 else 0
+                embedding_per_page = embedding_elapsed / successful_pages if embedding_elapsed > 0 else 0
+                print(f"   • Speed: {parsing_per_page:.1f}s/page (parsing), {embedding_per_page:.1f}s/page (embedding)")
             
             return True
             
@@ -1405,8 +1633,12 @@ class RAGDocumentStore(DocumentStore):
             top_k = kwargs.get('top_k', DEFAULT_TOP_K)
             
             # Load index if not already loaded
-            load_start = time.time()
             if not self.index:
+                # Check if vector store type matches
+                stored_vector_store_type = self.state.get("vector_store_type")
+                if stored_vector_store_type and stored_vector_store_type != self.vector_store_type:
+                    return f"Vector store type mismatch. Documents were indexed with {stored_vector_store_type}, but current store is {self.vector_store_type}. Please re-index with: python document_manager.py --collection {self.collection} --update"
+                
                 if not self.state.get("index_created", False):
                     # Check if there are documents in the folder
                     docs = self._scan_documents()
@@ -1420,10 +1652,8 @@ class RAGDocumentStore(DocumentStore):
                 # Reload index from storage
                 try:
                     print("🔄 Loading index from storage...")
-                    chroma_collection = self.chroma_client.get_collection(
-                        name=f"{self.collection}_vectors"
-                    )
-                    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+                    collection_name = f"{self.collection}_vectors"
+                    vector_store = self._get_vector_store_for_loading(collection_name)
                     self.index = VectorStoreIndex.from_vector_store(vector_store)
                 except Exception as e:
                     # Check if there are documents in the folder
@@ -1434,8 +1664,6 @@ class RAGDocumentStore(DocumentStore):
                         return f"Documents found but not indexed. Please index them first."
                     else:
                         return f"Could not load vector index: {e}"
-            
-            load_elapsed = time.time() - load_start
             
             # Create retriever with the requested top_k
             retriever = self.index.as_retriever(similarity_top_k=top_k)
@@ -1448,105 +1676,37 @@ class RAGDocumentStore(DocumentStore):
             
             if not nodes:
                 query_elapsed = time.time() - query_start
-                print(f"⏱️  Query time: {query_elapsed:.2f}s (no results found)")
+                print(f"⏱️ Query time: {query_elapsed:.2f}s (no results found)")
                 return "No relevant documents found for your query."
             
             print(f"📊 Retrieved {len(nodes)} chunks ({retrieve_elapsed:.2f}s)")
             
-            # Apply reranking if available
-            rerank_elapsed = 0
-            if self.cohere_reranker:
-                print(f"🔄 Applying Cohere reranking...")
+            # Apply reranking if enabled
+            if self.cohere_reranker and len(nodes) > 1:
+                print(f"🔄 Reranking {len(nodes)} chunks...")
                 rerank_start = time.time()
-                nodes = self.cohere_reranker.postprocess_nodes(
-                    nodes=nodes,
-                    query_str=query
-                )
+                nodes = self.cohere_reranker.postprocess_nodes(nodes, query_str=query)
                 rerank_elapsed = time.time() - rerank_start
-                print(f"✅ Reranked to top {len(nodes)} chunks ({rerank_elapsed:.2f}s)")
+                print(f"✅ Reranked to {len(nodes)} chunks ({rerank_elapsed:.2f}s)")
             
-            # Show chunk previews if requested
-            show_chunks = kwargs.get('show_chunks', False)
-            
-            # Build context from retrieved nodes
-            context_parts = []
-            sources = set()
+            # Format response
+            response_parts = []
             for i, node in enumerate(nodes, 1):
-                if show_chunks:
-                    # Show chunk preview and score
-                    chunk_preview = node.text[:200].replace('\n', ' ')
-                    score = node.score if hasattr(node, 'score') else 'N/A'
-                    print(f"   Chunk {i} (score: {score}): {chunk_preview}...")
+                metadata = node.metadata or {}
+                file_name = metadata.get('file_name', 'Unknown')
+                page_label = metadata.get('page_label', '')
                 
-                context_parts.append(f"[Document {i}]\n{node.text}\n")
-                # Extract source info
-                if hasattr(node, 'metadata') and 'file_name' in node.metadata:
-                    sources.add(node.metadata['file_name'])
+                response_parts.append(f"\n--- Chunk {i} (from {file_name}")
+                if page_label:
+                    response_parts.append(f", {page_label}")
+                response_parts.append(") ---\n")
+                response_parts.append(node.text)
+                response_parts.append("\n")
             
-            context = "\n".join(context_parts)
-            sources_text = ", ".join(sources) if sources else "Unknown"
-            
-            # Use OpenAI v2 API for query
-            print(f"💬 Generating response using {self.model}...")
-            llm_start = time.time()
-            response = self.client.responses.parse(
-                model=self.model,
-                input=[
-                    {
-                        "role": "system",
-                        "content": f"""You are a helpful document analysis assistant for the '{self.collection}' collection.
-
-You will be provided with relevant document excerpts. Use this information to answer the user's question accurately.
-
-Guidelines:
-1. Base your answer strictly on the provided document excerpts
-2. Be specific and cite information from the documents
-3. If the information is not in the provided excerpts, clearly state that
-4. Provide accurate, well-sourced answers
-5. Do not include citation markers or reference numbers
-
-Sources: {sources_text}
-"""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""Context from documents:
-
-{context}
-
-Question: {query}"""
-                    }
-                ],
-                reasoning={"effort": self.reasoning_effort},
-                text={"verbosity": self.text_verbosity}
-            )
-            llm_elapsed = time.time() - llm_start
-            
-            # Extract response text
-            response_text = None
-            if hasattr(response, 'output') and response.output:
-                for item in response.output:
-                    if hasattr(item, 'content') and item.content:
-                        for content_item in item.content:
-                            if hasattr(content_item, 'text'):
-                                response_text = content_item.text
-                                break
-            
-            if not response_text:
-                response_text = "No response generated."
-            
-            # Print timing summary
             query_elapsed = time.time() - query_start
-            print(f"\n⏱️  Query timing: {query_elapsed:.2f}s total")
-            print(f"   📊 Breakdown:")
-            if load_elapsed > 0.01:
-                print(f"      • Loading index: {load_elapsed:.2f}s")
-            print(f"      • Retrieval: {retrieve_elapsed:.2f}s")
-            if rerank_elapsed > 0:
-                print(f"      • Reranking: {rerank_elapsed:.2f}s")
-            print(f"      • LLM generation: {llm_elapsed:.2f}s")
+            print(f"⏱️  Total query time: {query_elapsed:.2f}s")
             
-            return response_text
+            return "".join(response_parts)
             
         except Exception as e:
             print(f"❌ Error querying documents: {e}")
@@ -1559,17 +1719,14 @@ Question: {query}"""
         try:
             import shutil
             
-            # Delete Chroma collection
-            try:
-                self.chroma_client.delete_collection(name=f"{self.collection}_vectors")
-                print(f"🗑️  Deleted Chroma collection")
-            except Exception as e:
-                print(f"⚠️  Warning: Could not delete Chroma collection: {e}")
+            # Delete vector store collection
+            collection_name = f"{self.collection}_vectors"
+            self._delete_collection(collection_name)
             
             # Remove storage directory
             if self.storage_dir.exists():
                 shutil.rmtree(self.storage_dir)
-                print(f"✅ Deleted collection '{self.collection}'")
+                print(f"🗑️  Deleted collection '{self.collection}'")
             else:
                 print(f"ℹ️  Collection '{self.collection}' not found")
             
@@ -1581,8 +1738,12 @@ Question: {query}"""
     
     def get_info(self) -> Optional[Dict[str, Any]]:
         """Get information about the collection."""
+        documents = self.state.get("documents", {})
+        total_documents = len([doc for doc in documents.values() if doc.get("indexed", False)])
+        
         return {
-            "total_documents": self.state.get("total_documents", 0),
+            "total_documents": total_documents,
+            "total_pages": self.state.get("total_pages", 0),
             "last_updated": self.state.get("last_updated"),
             "storage_dir": str(self.storage_dir),
             "collection": self.collection,
@@ -1598,22 +1759,38 @@ Question: {query}"""
         return list(self.state.get("documents", {}).keys())
     
     @classmethod
-    def list_all_collections(cls, storage_dir: str = DEFAULT_STORAGE_DIR) -> List[str]:
+    def list_all_collections(cls, storage_dir: str = None) -> List[str]:
         """List all collections in the RAG storage directory (class method)."""
-        storage_path = Path(storage_dir)
-        if not storage_path.exists():
-            return []
+        # Support both new vector_stores and legacy chroma_stores directories
+        if storage_dir is None:
+            vector_stores_path = Path(DEFAULT_STORAGE_DIR)
+            chroma_stores_path = Path("data/rag/chroma_stores")  # Legacy path
+        else:
+            vector_stores_path = Path(storage_dir)
+            chroma_stores_path = Path(storage_dir.replace("vector_stores", "chroma_stores"))
         
-        collections = []
-        try:
-            # Each subdirectory represents a collection
-            for item in storage_path.iterdir():
-                if item.is_dir():
-                    # Check if it has a rag_state.json file (indicates valid collection)
-                    state_file = item / "rag_state.json"
-                    if state_file.exists():
-                        collections.append(item.name)
-        except Exception:
-            return []
+        collections = set()
+        
+        # Check new vector_stores directory
+        if vector_stores_path.exists():
+            try:
+                for item in vector_stores_path.iterdir():
+                    if item.is_dir():
+                        state_file = item / "rag_state.json"
+                        if state_file.exists():
+                            collections.add(item.name)
+            except Exception:
+                pass
+        
+        # Check legacy chroma_stores directory for backward compatibility
+        if chroma_stores_path.exists() and chroma_stores_path != vector_stores_path:
+            try:
+                for item in chroma_stores_path.iterdir():
+                    if item.is_dir():
+                        state_file = item / "rag_state.json"
+                        if state_file.exists():
+                            collections.add(item.name)
+            except Exception:
+                pass
         
         return sorted(collections)

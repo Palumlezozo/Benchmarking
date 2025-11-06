@@ -3,11 +3,12 @@
 Document Manager - Manage document collections with pluggable backends
 
 A flexible script that manages document collections with support for multiple backends:
-- RAG (default): Uses LlamaIndex + Chroma for local RAG with LlamaParse
+- RAG (default): Uses LlamaIndex + Qdrant (default) or Chroma for local RAG with LlamaParse
 - OpenAI: Uses OpenAI's file search tool and vector stores (with --openai-tools flag)
 
 Features:
 - Multiple backend support (RAG, OpenAI)
+- Vector store selection: Qdrant (default) or ChromaDB (--chroma flag)
 - Document upload and indexing
 - Query capabilities with semantic search
 - Collection management
@@ -51,11 +52,11 @@ DEFAULT_COLLECTION = "collection"
 def main():
     """Main function for the Document Manager."""
     parser = argparse.ArgumentParser(
-        description="Document Manager - Manage document collections (uses RAG backend by default)",
+        description="Document Manager - Manage document collections (uses RAG backend with Qdrant by default)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Update documents for default collection (uses RAG backend with LlamaParse)
+  # Update documents for default collection (uses RAG backend with Qdrant and LlamaParse)
   python document_manager.py --update
   
   # Update documents for specific collection (RAG backend)
@@ -67,6 +68,9 @@ Examples:
   
   # Query documents in specific collection
   python document_manager.py --collection "my_docs" --query "What are the main products?"
+  
+  # Use Chroma instead of Qdrant (default)
+  python document_manager.py --chroma --collection "my_docs" --update
   
   # Use OpenAI backend instead of RAG
   python document_manager.py --openai-tools --collection "my_docs" --update
@@ -98,7 +102,7 @@ Examples:
     )
     
     # Add common configuration arguments
-    add_common_arguments(parser, include_concurrent=False, include_timeout=False, include_similarity=False, include_embedding_model=True)
+    add_common_arguments(parser, include_similarity=False, include_embedding_model=True)
     
     # Actions
     parser.add_argument("--update", action="store_true", help="Update documents for the collection")
@@ -111,6 +115,7 @@ Examples:
     parser.add_argument("--chunks", action="store_true", help="Show retrieved chunks preview (RAG backend only)")
     parser.add_argument("--store-md", action="store_true", help="Store markdown outputs from LlamaParse in data/rag/markdowns/ (RAG backend only)")
     parser.add_argument("--no-llama-parse", action="store_true", help="Use classical LlamaIndex parsing instead of LlamaParse (RAG backend only)")
+    parser.add_argument("--chroma", action="store_true", help="Use Chroma instead of Qdrant (default) for vector store (RAG backend only)")
     
     parser.add_argument("--force", action="store_true", help="Skip confirmation prompts")
     
@@ -182,13 +187,18 @@ Examples:
                 print(f"📋 Collections with document stores (RAG backend):")
                 for collection in collections:
                     # Read state file directly to get document count
-                    state_file = Path("data/rag/chroma_stores") / collection / "rag_state.json"
+                    # Try both vector_stores and chroma_stores for backward compatibility
+                    state_file = Path("data/rag/vector_stores") / collection / "rag_state.json"
+                    if not state_file.exists():
+                        state_file = Path("data/rag/chroma_stores") / collection / "rag_state.json"
                     doc_count = 0
                     try:
                         if state_file.exists():
                             with open(state_file, 'r', encoding='utf-8') as f:
                                 state = json.load(f)
-                                doc_count = state.get("total_documents", 0)
+                                # Count indexed documents from state
+                                documents = state.get("documents", {})
+                                doc_count = len([doc for doc in documents.values() if doc.get("indexed", False)])
                     except Exception:
                         pass
                     print(f"  - {collection} ({doc_count} documents)")
@@ -227,6 +237,7 @@ Examples:
         if backend == RAG_BACKEND:
             store_kwargs["store_md"] = args.store_md
             store_kwargs["use_llama_parse"] = (not args.no_llama_parse)
+            store_kwargs["vector_store_type"] = "chroma" if args.chroma else "qdrant"
         
         store = create_document_store(**store_kwargs)
     except Exception as e:
@@ -258,7 +269,7 @@ Examples:
         # Handle confirmation for delete (unless --force is used)
         if not args.force:
             try:
-                confirm = input(f"\n⚠️  Are you sure you want to delete all documents in collection '{args.collection}'? Type 'yes' to confirm: ")
+                confirm = input(f"\n⚠️  Are you sure you want to delete all documents in collection '{args.collection}'? (yes/no): ")
                 if confirm.lower() != 'yes':
                     print("❌ Deletion cancelled")
                     return
@@ -266,7 +277,7 @@ Examples:
                 print("❌ Cannot get confirmation in non-interactive mode. Use --force to skip confirmation.")
                 return
         
-        print(f"🗑️  Deleting documents for collection '{args.collection}'...")
+        print(f"\n🗑️  Deleting documents for collection '{args.collection}'...")
         success = store.delete_documents()
         if success:
             print(f"✅ Successfully deleted documents for collection '{args.collection}'")
@@ -287,8 +298,7 @@ Examples:
     if args.query:
         query_start = time.time()
         
-        # Pass show_chunks parameter for RAG backend
-        response = store.query_documents(args.query, show_chunks=args.chunks)
+        response = store.query_documents(args.query)
         
         query_elapsed = time.time() - query_start
         

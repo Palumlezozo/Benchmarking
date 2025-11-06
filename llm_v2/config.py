@@ -36,7 +36,7 @@ class Config:
     ])
     
     # Rate Limiting Configuration
-    EMBEDDING_BATCH_SIZE: int = 20  # Chunks per embedding API call (reduce if hitting rate limits)
+    EMBEDDING_BATCH_SIZE: int = 50  # Chunks per embedding API call (reduce if hitting rate limits)
     EMBEDDING_DELAY_SECONDS: float = 1  # Delay between embedding batches (increase if hitting rate limits)
     MAX_NODES_PER_BATCH: int = 40  # Max nodes to process before waiting (helps with rate limits)
     
@@ -52,20 +52,67 @@ class Config:
     LLAMA_PARSE_RESULT_TYPE: str = "markdown"  # Options: "text", "markdown"
     LLAMA_PARSE_VERBOSE: bool = False
     LLAMA_PARSE_LANGUAGE: str = "en"  # Languages for OCR (English, French, Dutch)
-    LLAMA_PARSE_PARSE_MODE: str = "parse_page_with_llm"
+    LLAMA_PARSE_PARSE_MODE: Optional[str] = None #"parse_page_with_llm" # Use this mode for better parsing, but not with multimodal model
     LLAMA_PARSE_INVALIDATE_CACHE: bool = True  # Force re-parsing of cached documents (set to True to refresh)
     LLAMA_PARSE_DO_NOT_CACHE: bool = True  # Don't cache parsing results (TEMPORARY FOR DEBUGGING)
-    LLAMA_PARSE_NUM_WORKERS: int = 12  # Number of workers for parallel processing
+    LLAMA_PARSE_NUM_WORKERS: int = 19  # Number of workers for parallel processing
     # Advanced parsing options -> disabled if without_llm 
     LLAMA_PARSE_SKIP_DIAGONAL_TEXT: bool = False
     LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES: bool = False  # Extract sub-tables from spreadsheets
     LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION: bool = False  # Force formula computation in spreadsheets
-    # Large document partitioning (but then, we can't do batch processing)
-    LLAMA_PARSE_PARTITION_PAGES: Optional[int] = None  # Number of pages per partition for large documents (None = no partitioning)
+    # Large document partitioning (disabled - use None to disable)
+    # LLAMA_PARSE_PARTITION_PAGES: Optional[int] = None  # Number of pages per partition for large documents (None = no partitioning)
+    # If you want to parse concurrently partitions, you need to specify target pages
+    # LLAMA_PARSE_TARGET_PAGES: Optional[str] = None  # List of specific page numbers to parse (None = parse all pages)
+    
+    # Azure OpenAI Configuration for LlamaParse (optional)
+    LLAMA_PARSE_USE_VENDOR_MULTIMODAL_MODEL: bool = True # Use vendor multimodal model
+    LLAMA_PARSE_VENDOR_MULTIMODAL_MODEL_NAME: str = "openai-gpt-5-mini"  # Vendor multimodal model name
+    LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME: Optional[str] = "gpt-5-mini"  # Azure OpenAI deployment name (e.g., "llamaparse-gpt-4o")
+    LLAMA_PARSE_AZURE_OPENAI_ENDPOINT: Optional[str] = "https://luc-openai-sw.openai.azure.com/openai/deployments/gpt-5-mini/chat/completions?api-version=2025-01-01-preview"  # Azure OpenAI endpoint URL
+    LLAMA_PARSE_AZURE_OPENAI_API_VERSION: Optional[str] = "2025-01-01-preview"  # Azure OpenAI API version (e.g., "2024-02-15-preview")
+    
+    # Vector Store Configuration
+    USE_QDRANT: bool = True  # Use Qdrant as default vector store (False = use Chroma)
+    QDRANT_HOST: str = "localhost"  # Qdrant server host
+    QDRANT_PORT: int = 6333  # Qdrant HTTP API port
+    QDRANT_API_KEY: Optional[str] = None  # Optional API key for Qdrant Cloud
+    
+    # Qdrant Optimization Parameters
+    # HNSW Index Parameters (for approximate nearest neighbor search)
+    QDRANT_HNSW_M: int = 16  # Number of bi-directional links per node (12-16 recommended, higher = better accuracy but more memory)
+    QDRANT_HNSW_EF_CONSTRUCT: int = 200  # Size of candidate list during construction (100-200, higher = better quality but slower indexing)
+    QDRANT_HNSW_EF: Optional[int] = None  # Size of candidate list during search (None = use default, higher = better accuracy but slower queries)
+    # Note: QDRANT_HNSW_EF is a query-time parameter, not collection-time. Currently not used as LlamaIndex handles queries.
+    QDRANT_HNSW_FULL_SCAN_THRESHOLD: int = 10000  # Use full scan if collection is smaller than this
+    
+    # Memory and Storage
+    QDRANT_ON_DISK: bool = False  # Store vectors on disk (False = faster but uses more RAM, True = less RAM but slower)
+    QDRANT_ON_DISK_PAYLOAD: bool = True  # Store payload on disk (True recommended for large payloads)
+    
+    # Segment Configuration (for parallel processing)
+    QDRANT_DEFAULT_SEGMENT_NUMBER: Optional[int] = None  # Number of segments (None = auto, set to CPU cores for optimal parallelism)
+    QDRANT_MAX_SEGMENT_SIZE: Optional[int] = None  # Max segment size in KB (None = auto)
+    QDRANT_MEMMAP_THRESHOLD: Optional[int] = None  # Max vectors to store in-memory per segment (None = auto)
+    
+    # Optimizer Configuration
+    QDRANT_DELETED_THRESHOLD: float = 0.2  # Fraction of deleted vectors to trigger vacuum (0.2 = 20%)
+    QDRANT_VACUUM_MIN_VECTOR_NUMBER: int = 1000  # Minimum vectors in segment to perform vacuum
+    QDRANT_INDEXING_THRESHOLD: int = 10000  # Minimum vectors before creating index
+    QDRANT_FLUSH_INTERVAL_SEC: int = 5  # Interval between flushes to disk
+    
+    # Crawl4AI Configuration (for website scraping)
+    CRAWL4AI_BROWSER_TYPE: str = "chromium"  # Browser type: "chromium", "firefox", "webkit"
+    CRAWL4AI_HEADLESS: bool = True  # Run browser in headless mode
+    CRAWL4AI_PAGE_TIMEOUT: int = 30000  # Page load timeout in milliseconds
+    CRAWL4AI_WAIT_UNTIL: str = "networkidle"  # Wait condition: "networkidle", "load", "domcontentloaded"
+    CRAWL4AI_MAX_DEPTH: int = 4  # Maximum crawl depth for website crawling
+    CRAWL4AI_MAX_PAGES: int = 50  # Maximum number of pages to crawl
+    CRAWL4AI_WORD_COUNT_THRESHOLD: int = 200  # Minimum word count to consider a page
+    CRAWL4AI_VERBOSE: bool = False  # Enable verbose logging
     
     # Processing Configuration
-    DEFAULT_MAX_CONCURRENT: int = 15
-    DEFAULT_TIMEOUT: int = 200
+    DOCUMENT_BATCH_SIZE: int = 19  # Number of documents to process concurrently in each batch
     
     # Similarity and Deduplication
     DEFAULT_SIMILARITY_THRESHOLD: float = 0.8
@@ -158,22 +205,6 @@ def get_model_high_config_from_env() -> tuple[str, str, str]:
         )
 
 
-def get_max_concurrent_from_env() -> int:
-    """Get max concurrent from environment variable or use default."""
-    try:
-        return int(os.getenv("MAX_CONCURRENT", config.DEFAULT_MAX_CONCURRENT))
-    except ValueError:
-        return config.DEFAULT_MAX_CONCURRENT
-
-
-def get_timeout_from_env() -> int:
-    """Get timeout from environment variable or use default."""
-    try:
-        return int(os.getenv("TIMEOUT", config.DEFAULT_TIMEOUT))
-    except ValueError:
-        return config.DEFAULT_TIMEOUT
-
-
 def get_similarity_threshold_from_env() -> float:
     """Get similarity threshold from environment variable or use default."""
     try:
@@ -187,16 +218,13 @@ def get_embedding_model_from_env() -> str:
     return os.getenv("EMBEDDING_MODEL", config.DEFAULT_EMBEDDING_MODEL)
 
 
-def add_common_arguments(parser, include_concurrent: bool = True, include_timeout: bool = True, 
-                        include_similarity: bool = True, include_high_model: bool = False,
+def add_common_arguments(parser, include_similarity: bool = True, include_high_model: bool = False,
                         include_embedding_model: bool = False) -> None:
     """
     Add common CLI arguments to an ArgumentParser.
     
     Args:
         parser: ArgumentParser instance to add arguments to
-        include_concurrent: Whether to include --max-concurrent argument
-        include_timeout: Whether to include --timeout argument  
         include_similarity: Whether to include --similarity-threshold argument
         include_high_model: Whether to include --model-high argument
         include_embedding_model: Whether to include --embedding-model argument (for RAG)
@@ -233,22 +261,6 @@ def add_common_arguments(parser, include_concurrent: bool = True, include_timeou
     )
     
     # Optional arguments based on script needs
-    if include_concurrent:
-        parser.add_argument(
-            "--max-concurrent",
-            type=int,
-            default=get_max_concurrent_from_env(),
-            help=f"Maximum number of items to process concurrently (default: {config.DEFAULT_MAX_CONCURRENT})"
-        )
-    
-    if include_timeout:
-        parser.add_argument(
-            "--timeout",
-            type=int,
-            default=get_timeout_from_env(),
-            help=f"API timeout in seconds (default: {config.DEFAULT_TIMEOUT})"
-        )
-    
     if include_similarity:
         parser.add_argument(
             "--similarity-threshold",
@@ -365,9 +377,8 @@ DEFAULT_EMBEDDING_MODEL = config.DEFAULT_EMBEDDING_MODEL
 EMBEDDING_BATCH_SIZE = config.EMBEDDING_BATCH_SIZE
 EMBEDDING_DELAY_SECONDS = config.EMBEDDING_DELAY_SECONDS
 MAX_NODES_PER_BATCH = config.MAX_NODES_PER_BATCH
-DEFAULT_MAX_CONCURRENT = config.DEFAULT_MAX_CONCURRENT
-DEFAULT_TIMEOUT = config.DEFAULT_TIMEOUT
 DEFAULT_SIMILARITY_THRESHOLD = config.DEFAULT_SIMILARITY_THRESHOLD
+DOCUMENT_BATCH_SIZE = config.DOCUMENT_BATCH_SIZE
 DEFAULT_CHUNK_SIZE = config.DEFAULT_CHUNK_SIZE
 DEFAULT_CHUNK_OVERLAP = config.DEFAULT_CHUNK_OVERLAP
 DEFAULT_TOP_K = config.DEFAULT_TOP_K
@@ -397,4 +408,40 @@ LLAMA_PARSE_NUM_WORKERS = config.LLAMA_PARSE_NUM_WORKERS
 LLAMA_PARSE_SKIP_DIAGONAL_TEXT = config.LLAMA_PARSE_SKIP_DIAGONAL_TEXT
 LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES = config.LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES
 LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION = config.LLAMA_PARSE_SPREADSHEET_FORCE_FORMULA_COMPUTATION
-LLAMA_PARSE_PARTITION_PAGES = config.LLAMA_PARSE_PARTITION_PAGES
+# LLAMA_PARSE_PARTITION_PAGES and LLAMA_PARSE_TARGET_PAGES are disabled (commented out in Config class)
+LLAMA_PARSE_USE_VENDOR_MULTIMODAL_MODEL = config.LLAMA_PARSE_USE_VENDOR_MULTIMODAL_MODEL
+LLAMA_PARSE_VENDOR_MULTIMODAL_MODEL_NAME = config.LLAMA_PARSE_VENDOR_MULTIMODAL_MODEL_NAME
+LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME = config.LLAMA_PARSE_AZURE_OPENAI_DEPLOYMENT_NAME
+LLAMA_PARSE_AZURE_OPENAI_ENDPOINT = config.LLAMA_PARSE_AZURE_OPENAI_ENDPOINT
+LLAMA_PARSE_AZURE_OPENAI_API_VERSION = config.LLAMA_PARSE_AZURE_OPENAI_API_VERSION
+
+# Vector Store configuration exports
+USE_QDRANT = config.USE_QDRANT
+QDRANT_HOST = config.QDRANT_HOST
+QDRANT_PORT = config.QDRANT_PORT
+QDRANT_API_KEY = config.QDRANT_API_KEY
+
+# Qdrant Optimization configuration exports
+QDRANT_HNSW_M = config.QDRANT_HNSW_M
+QDRANT_HNSW_EF_CONSTRUCT = config.QDRANT_HNSW_EF_CONSTRUCT
+QDRANT_HNSW_EF = config.QDRANT_HNSW_EF
+QDRANT_HNSW_FULL_SCAN_THRESHOLD = config.QDRANT_HNSW_FULL_SCAN_THRESHOLD
+QDRANT_ON_DISK = config.QDRANT_ON_DISK
+QDRANT_ON_DISK_PAYLOAD = config.QDRANT_ON_DISK_PAYLOAD
+QDRANT_DEFAULT_SEGMENT_NUMBER = config.QDRANT_DEFAULT_SEGMENT_NUMBER
+QDRANT_MAX_SEGMENT_SIZE = config.QDRANT_MAX_SEGMENT_SIZE
+QDRANT_MEMMAP_THRESHOLD = config.QDRANT_MEMMAP_THRESHOLD
+QDRANT_DELETED_THRESHOLD = config.QDRANT_DELETED_THRESHOLD
+QDRANT_VACUUM_MIN_VECTOR_NUMBER = config.QDRANT_VACUUM_MIN_VECTOR_NUMBER
+QDRANT_INDEXING_THRESHOLD = config.QDRANT_INDEXING_THRESHOLD
+QDRANT_FLUSH_INTERVAL_SEC = config.QDRANT_FLUSH_INTERVAL_SEC
+
+# Crawl4AI configuration exports
+CRAWL4AI_BROWSER_TYPE = config.CRAWL4AI_BROWSER_TYPE
+CRAWL4AI_HEADLESS = config.CRAWL4AI_HEADLESS
+CRAWL4AI_PAGE_TIMEOUT = config.CRAWL4AI_PAGE_TIMEOUT
+CRAWL4AI_WAIT_UNTIL = config.CRAWL4AI_WAIT_UNTIL
+CRAWL4AI_MAX_DEPTH = config.CRAWL4AI_MAX_DEPTH
+CRAWL4AI_MAX_PAGES = config.CRAWL4AI_MAX_PAGES
+CRAWL4AI_WORD_COUNT_THRESHOLD = config.CRAWL4AI_WORD_COUNT_THRESHOLD
+CRAWL4AI_VERBOSE = config.CRAWL4AI_VERBOSE
