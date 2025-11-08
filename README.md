@@ -5,16 +5,18 @@ A powerful, flexible document Q&A system that combines multiple document search 
 ## 🌟 Key Features
 
 ### Multi-Backend Support
-- **RAG Backend (Default)**: Local vector search using LlamaIndex + Qdrant (default) or ChromaDB with Azure OpenAI or standard OpenAI
+- **RAG Backend (Default)**: Local vector search using direct Qdrant SDK (default) or ChromaDB with Azure OpenAI or standard OpenAI
 - **OpenAI Backend**: Cloud-based using OpenAI's native file_search tool (use `--openai-tools` flag)
 - **Hybrid Approach**: Combine document search with real-time web search
 - **Flexible API**: Auto-detects Azure OpenAI or falls back to standard OpenAI
 - **Vector Store Options**: Qdrant (default, Docker-based) or ChromaDB (local files)
+- **Direct SDK Integration**: Both indexing and retrieval use native Qdrant SDK for optimal performance and consistency
 
 ### Advanced Document Processing
 - **LlamaParse Integration**: High-quality document parsing with OCR support
 - **Multiple File Formats**: PDF, DOCX, PPTX, XLSX, TXT, MD, HTML
-- **Page Number Tracking**: Accurate page citations in responses
+- **Page Number Tracking**: Accurate page citations with consolidated ranges (e.g., "pages 151-154")
+- **Table Preservation**: Adjacent chunks merged to preserve table structures across page boundaries
 - **Cohere Reranking**: Improved relevance with optional reranking
 
 ### Multi-Collection Support
@@ -289,15 +291,35 @@ This verifies:
            ▼                                    ▼
 ┌─────────────────┐                ┌────────────────────┐
 │OpenAI Vector    │                │ RAG Document Store │
-│Store            │                │ - LlamaIndex       │
-│- Cloud-based    │                │ - Qdrant (default) │
-│- Managed by     │                │   or ChromaDB      │
-│  OpenAI         │                │ - Cohere Rerank    │
+│Store            │                │ - Direct Qdrant SDK│
+│- Cloud-based    │                │   (indexing +      │
+│- Managed by     │                │    retrieval)      │
+│  OpenAI         │                │ - Qdrant (default) │
+│                 │                │   or ChromaDB      │
+│                 │                │ - Cohere Rerank    │
 │                 │                │ - LlamaParse       │
 │                 │                │ - Azure OpenAI     │
 └─────────────────┘                │   or OpenAI        │
                                    └────────────────────┘
 ```
+
+### Key Architecture Improvements
+
+**Direct Qdrant SDK Integration:**
+- Both indexing (`rag_client.py`) and retrieval (`rag_tool.py`) now use the native Qdrant SDK directly
+- Eliminates LlamaIndex wrapper overhead for better performance
+- Ensures consistent payload format for reliable table and structured content retrieval
+- Maintains backward compatibility with legacy LlamaIndex-indexed collections
+
+**Enhanced Table Preservation:**
+- Adjacent chunks from the same page range are automatically merged
+- Preserves table structures that span multiple chunks
+- Improves retrieval quality for structured content like financial tables
+
+**Improved Source Display:**
+- Page numbers consolidated into ranges (e.g., "pages 151-154" instead of listing each page)
+- Reduces repetition in source citations
+- More readable and professional output
 
 ### Backend Comparison
 
@@ -439,9 +461,10 @@ All configuration parameters in one place.
 - Tavily web search options
 
 #### `rag_client.py` - RAG Document Store
-LlamaIndex + Qdrant (default) or ChromaDB implementation for local vector search with Azure OpenAI support.
+Direct Qdrant SDK (default) or ChromaDB implementation for local vector search with Azure OpenAI support.
 
 **Features:**
+- **Direct Qdrant SDK**: Native SDK for both indexing and retrieval (faster, more consistent)
 - Qdrant vector store (default, Docker-based) or ChromaDB (local files)
 - Azure OpenAI integration (automatic fallback to standard OpenAI)
 - Document chunking with semantic splitting
@@ -449,8 +472,9 @@ LlamaIndex + Qdrant (default) or ChromaDB implementation for local vector search
 - Optional markdown storage from LlamaParse outputs
 - Flexible parsing modes (LlamaParse or classical LlamaIndex)
 - Cohere reranking (optional)
-- Efficient caching and state management
+- Efficient caching and state management with global state files
 - Optimized Qdrant configuration (HNSW parameters, segment settings)
+- Consistent payload format for reliable table and structured content retrieval
 
 #### `openai_document_store.py` - OpenAI Document Store
 OpenAI's cloud-based vector store implementation.
@@ -472,9 +496,13 @@ Handles tool execution for the `my-tools` mode.
 Wraps RAG document store as a tool for multi-tool systems.
 
 **Features:**
+- **Direct Qdrant SDK retrieval**: Fast, native SDK-based retrieval (consistent with indexing)
+- **Table preservation**: Merges adjacent chunks from same page range to preserve table structures
+- **Consolidated page display**: Page numbers shown as ranges (e.g., "pages 151-154" instead of individual pages)
 - Per-collection tool instances
 - Unique naming for multi-collection support
 - Graceful degradation when collections unavailable
+- Backward compatibility with legacy LlamaIndex-indexed collections
 
 #### `tavily_tool.py` - Web Search Tools
 Tavily integration for web and news search.
@@ -544,22 +572,33 @@ DEFAULT_TAVILY_INCLUDE_ANSWER = True
 ```
 
 **Qdrant Optimization Settings:**
+All Qdrant settings are now grouped together in `config.py` for easier management:
+
 ```python
-# HNSW Index Parameters
+# Qdrant Vector Store Configuration
+USE_QDRANT = True  # Use Qdrant as default vector store (False = use Chroma)
+QDRANT_HOST = "localhost"  # Qdrant server host
+QDRANT_PORT = 6333  # Qdrant HTTP API port
+QDRANT_API_KEY = None  # Optional API key for Qdrant Cloud
+
+# Qdrant HNSW Index Parameters (for approximate nearest neighbor search)
 QDRANT_HNSW_M = 16  # Number of bi-directional links (12-16 recommended)
 QDRANT_HNSW_EF_CONSTRUCT = 200  # Candidate list size during construction (100-200)
+QDRANT_HNSW_EF = None  # Query-time parameter (None = use default)
 QDRANT_HNSW_FULL_SCAN_THRESHOLD = 10000  # Use full scan if collection smaller than this
 
-# Memory and Storage
+# Qdrant Memory and Storage Configuration
 QDRANT_ON_DISK = False  # Store vectors on disk (False = faster, True = less RAM)
 QDRANT_ON_DISK_PAYLOAD = True  # Store payload on disk (recommended)
 
-# Segment Configuration
+# Qdrant Segment Configuration (for parallel processing)
 QDRANT_DEFAULT_SEGMENT_NUMBER = None  # Auto (set to CPU cores for optimal parallelism)
 QDRANT_MAX_SEGMENT_SIZE = None  # Auto
+QDRANT_MEMMAP_THRESHOLD = None  # Auto
 
-# Optimizer Configuration
+# Qdrant Optimizer Configuration
 QDRANT_DELETED_THRESHOLD = 0.2  # Vacuum trigger threshold (20%)
+QDRANT_VACUUM_MIN_VECTOR_NUMBER = 1000  # Min vectors in segment to perform vacuum
 QDRANT_INDEXING_THRESHOLD = 10000  # Min vectors before creating index
 QDRANT_FLUSH_INTERVAL_SEC = 5  # Flush interval
 ```
@@ -1006,12 +1045,14 @@ llm-v2/
 │   │   ├── financials/              # Example: Financial documents
 │   │   └── operations/              # Example: Operations documents
 │   └── rag/
-│       ├── qdrant/                  # Qdrant vector store data (Docker volume)
-│       ├── chroma_stores/           # ChromaDB vector stores (legacy/--chroma)
-│       ├── vector_stores/           # Collection state files (RAG backend)
-│       ├── markdowns/               # Markdown outputs from LlamaParse (with --store-md)
-│       ├── openai_state.json        # OpenAI backend state
-│       └── rag_state.json           # RAG backend state (per collection)
+│       ├── qdrant/                  # Qdrant vector store data and global state
+│       │   └── rag_state.json       # Global state file for Qdrant collections
+│       ├── chroma/                  # ChromaDB vector stores (with --chroma)
+│       │   └── rag_state.json       # Global state file for ChromaDB collections
+│       ├── openai/                  # OpenAI backend state
+│       │   └── rag_state.json       # Global state file for OpenAI collections
+│       └── markdowns/               # Markdown outputs from LlamaParse (with --store-md)
+│           └── <collection-name>/  # Per-collection markdown files
 ├── tests/                           # Test files
 ├── .env                            # Environment variables (create this)
 ├── .python-version                 # Python version for uv
@@ -1118,7 +1159,16 @@ For questions or issues:
 
 ---
 
-**Version:** 0.3.0
+**Version:** 0.4.0
 **Last Updated:** November 2025  
 **Python:** 3.12+
+
+### Recent Updates (v0.4.0)
+
+- **Direct Qdrant SDK Integration**: Both indexing and retrieval now use native Qdrant SDK for optimal performance and consistency
+- **Table Preservation**: Adjacent chunks from same page ranges are merged to preserve table structures
+- **Consolidated Page Display**: Page numbers in sources shown as ranges (e.g., "pages 151-154")
+- **Simplified Directory Structure**: Global state files for each backend (Qdrant, ChromaDB, OpenAI)
+- **Reorganized Configuration**: All Qdrant settings grouped together in `config.py` for easier management
+- **Improved Payload Format**: Consistent format ensures reliable retrieval of tables and structured content
 

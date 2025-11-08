@@ -185,22 +185,37 @@ Examples:
             collections = RAGDocumentStore.list_all_collections()
             if collections:
                 print(f"📋 Collections with document stores (RAG backend):")
-                for collection in collections:
-                    # Read state file directly to get document count
-                    # Try both vector_stores and chroma_stores for backward compatibility
-                    state_file = Path("data/rag/vector_stores") / collection / "rag_state.json"
-                    if not state_file.exists():
-                        state_file = Path("data/rag/chroma_stores") / collection / "rag_state.json"
-                    doc_count = 0
-                    try:
-                        if state_file.exists():
-                            with open(state_file, 'r', encoding='utf-8') as f:
+                # Read from global state files
+                from .config import RAG_CHROMA_STATE_FILE, RAG_QDRANT_STATE_FILE
+                try:
+                    from config import RAG_CHROMA_STATE_FILE, RAG_QDRANT_STATE_FILE
+                except ImportError:
+                    pass
+                
+                # Load global state files
+                global_states = {}
+                for state_file_path, backend_name in [
+                    (Path(RAG_CHROMA_STATE_FILE), "chroma"),
+                    (Path(RAG_QDRANT_STATE_FILE), "qdrant")
+                ]:
+                    if state_file_path.exists():
+                        try:
+                            with open(state_file_path, 'r', encoding='utf-8') as f:
                                 state = json.load(f)
-                                # Count indexed documents from state
-                                documents = state.get("documents", {})
-                                doc_count = len([doc for doc in documents.values() if doc.get("indexed", False)])
-                    except Exception:
-                        pass
+                                if "collections" in state:
+                                    global_states[backend_name] = state["collections"]
+                        except Exception:
+                            pass
+                
+                for collection in collections:
+                    doc_count = 0
+                    # Check both ChromaDB and Qdrant state files
+                    for backend_name, collections_dict in global_states.items():
+                        if collection in collections_dict:
+                            collection_state = collections_dict[collection]
+                            documents = collection_state.get("documents", {})
+                            doc_count = len([doc for doc in documents.values() if doc.get("indexed", False)])
+                            break  # Found in one backend, no need to check others
                     print(f"  - {collection} ({doc_count} documents)")
             else:
                 print(f"📋 No collections with document stores found (RAG backend)")

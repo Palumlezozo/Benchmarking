@@ -23,7 +23,7 @@ load_dotenv()
 # Constants
 DOCUMENTS_DIR = "data/documents"
 RAG_DIR = "data/rag"
-STATE_FILE = "data/rag/openai_state.json"  # Separate state file for OpenAI backend
+STATE_FILE = "data/rag/openai/rag_state.json"  # Global state file for OpenAI backend
 SUPPORTED_EXTENSIONS = {'.txt', '.md', '.docx', '.pdf', '.xlsx', '.ppt'}
 
 
@@ -53,9 +53,8 @@ class OpenAIDocumentStore(DocumentStore):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.state_file = Path(STATE_FILE)
         
-        # Ensure RAG directory exists
-        self.rag_dir = Path(RAG_DIR)
-        self.rag_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure state file directory exists
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Load global state (manages all collections)
         self.state = self._load_state()

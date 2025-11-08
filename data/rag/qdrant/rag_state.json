@@ -1,0 +1,24 @@
+{
+  "collections": {
+    "umicore": {
+      "documents": {
+        "data/documents/umicore/Umicore Annual Report 2024.pdf": {
+          "size": 16634016,
+          "modified": 1760677623.1791434,
+          "extension": ".pdf",
+          "indexed": true,
+          "indexed_at": "2025-11-08T18:56:40.291418",
+          "page_count": 212,
+          "chunk_count": 264
+        }
+      },
+      "last_updated": "2025-11-08T18:56:40.291428",
+      "total_pages": 212,
+      "indexed_pages": 212,
+      "failed_pages": 0,
+      "index_created": true,
+      "vector_store_type": "qdrant"
+    }
+  },
+  "last_updated": "2025-11-08T18:56:40.291429"
+}

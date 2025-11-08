@@ -49,7 +49,7 @@ try:
     from qdrant_client import QdrantClient
     from qdrant_client.models import (
         Distance, VectorParams, HnswConfigDiff, 
-        OptimizersConfigDiff, VectorsConfig
+        OptimizersConfigDiff, VectorsConfig, PointStruct
     )
     QDRANT_CLIENT_AVAILABLE = True
 except ImportError:
@@ -60,6 +60,7 @@ except ImportError:
     HnswConfigDiff = None
     OptimizersConfigDiff = None
     VectorsConfig = None
+    PointStruct = None
 
 # LlamaParse imports
 try:
@@ -123,7 +124,11 @@ from config import (
     USE_COHERE_RERANK,
     COHERE_RERANK_MODEL,
     COHERE_RERANK_TOP_N,
-    DOCUMENT_BATCH_SIZE
+    DOCUMENT_BATCH_SIZE,
+    RAG_MARKDOWNS_DIR,
+    RAG_CHROMA_STORAGE_DIR,
+    RAG_CHROMA_STATE_FILE,
+    RAG_QDRANT_STATE_FILE,
 )
 
 # Load environment variables
@@ -135,8 +140,9 @@ load_dotenv()
 
 # Storage paths
 DEFAULT_DOCUMENTS_DIR = "data/documents"
-DEFAULT_STORAGE_DIR = "data/rag/vector_stores"  # Changed from chroma_stores for compatibility with both stores
-DEFAULT_MARKDOWNS_DIR = "data/rag/markdowns"
+# Use new simplified structure - storage_dir is now backend-specific
+DEFAULT_STORAGE_DIR = RAG_CHROMA_STORAGE_DIR  # For ChromaDB, use data/rag/chroma
+DEFAULT_MARKDOWNS_DIR = RAG_MARKDOWNS_DIR  # Use data/rag/markdowns
 
 # File types supported by LlamaParse (that may contain page markers)
 LLAMAPARSE_SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls', '.html', '.htm'}
@@ -218,23 +224,29 @@ class RAGDocumentStore(DocumentStore):
         if self.vector_store_type not in ["qdrant", "chroma"]:
             raise ValueError(f"Unsupported vector_store_type: {self.vector_store_type}. Must be 'qdrant' or 'chroma'")
         
-        # Handle storage directory with backward compatibility
-        # For Qdrant, prefer new vector_stores path; for Chroma, use provided path or legacy path
-        if self.vector_store_type == "qdrant" and ("chroma_stores" in str(storage_dir) or storage_dir == "data/rag/chroma_stores"):
-            # Switch to new vector_stores path for Qdrant when legacy path is detected
-            self.storage_dir = Path(DEFAULT_STORAGE_DIR) / collection
-        else:
-            self.storage_dir = Path(storage_dir) / collection
+        # Set storage directory based on vector store type
+        if self.vector_store_type == "chroma":
+            # ChromaDB: per-collection subdirectory for database files
+            self.storage_dir = Path(RAG_CHROMA_STORAGE_DIR) / collection
+            self.storage_dir.mkdir(parents=True, exist_ok=True)
+            # Global state file for all ChromaDB collections
+            self.state_file = Path(RAG_CHROMA_STATE_FILE)
+        else:  # qdrant
+            # Qdrant: no local storage (service-based), only state file
+            self.storage_dir = None  # No local storage for Qdrant
+            # Global state file for all Qdrant collections
+            self.state_file = Path(RAG_QDRANT_STATE_FILE)
         
-        # Create storage directory if it doesn't exist (needed for Chroma)
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure state file directory exists
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        
         # Create markdowns directory if markdown storage is enabled
         if self.store_md:
             self.markdowns_dir.mkdir(parents=True, exist_ok=True)
         
-        # State tracking (separate from OpenAI state)
-        self.state_file = self.storage_dir / "rag_state.json"
-        self.state = self._load_state()
+        # State tracking (global state file with per-collection data)
+        self.global_state = self._load_global_state()
+        self.state = self._get_collection_state()
         
         # Initialize OpenAI client for queries (using v2 API)
         # Use Azure OpenAI if configured, otherwise use standard OpenAI
@@ -274,7 +286,10 @@ class RAGDocumentStore(DocumentStore):
         print(f"📚 RAG Document Store initialized for collection '{collection}'")
         print(f"   Vector Store: {self.vector_store_type.upper()}")
         print(f"   Documents: {self.documents_dir}")
-        print(f"   Storage: {self.storage_dir}")
+        if self.storage_dir:
+            print(f"   Storage: {self.storage_dir}")
+        else:
+            print(f"   Storage: Qdrant service (no local storage)")
         if self.store_md:
             print(f"   Markdowns: {self.markdowns_dir}")
         print(f"   Embedding Model: {embedding_model}")
@@ -456,10 +471,12 @@ class RAGDocumentStore(DocumentStore):
             if not CHROMA_AVAILABLE:
                 raise ImportError("Chroma not available. Install with: pip install chromadb llama-index-vector-stores-chroma")
             
-            # Initialize Chroma client
+            # Initialize Chroma client with per-collection storage directory
+            if self.storage_dir is None:
+                raise ValueError("ChromaDB requires a storage directory")
             self.chroma_client = chromadb.PersistentClient(path=str(self.storage_dir))
             self.vector_client = self.chroma_client  # Alias for compatibility
-            print(f"   Using Chroma (local storage)")
+            print(f"   Using Chroma (local storage at {self.storage_dir})")
         else:
             raise ValueError(f"Unsupported vector_store_type: {self.vector_store_type}")
     
@@ -610,45 +627,79 @@ class RAGDocumentStore(DocumentStore):
         """
         try:
             if self.vector_store_type == "qdrant":
-                self.qdrant_client.delete_collection(collection_name=collection_name)
-                print(f"🗑️  Deleted Qdrant collection '{collection_name}'")
-                return True
+                # Check if collection exists before deleting
+                collections = self.qdrant_client.get_collections().collections
+                collection_exists = any(col.name == collection_name for col in collections)
+                if collection_exists:
+                    self.qdrant_client.delete_collection(collection_name=collection_name)
+                    print(f"🗑️  Deleted Qdrant collection '{collection_name}'")
+                    return True
+                else:
+                    print(f"ℹ️  Qdrant collection '{collection_name}' not found (may have been already deleted)")
+                    return True  # Return True since the goal is achieved (collection doesn't exist)
             elif self.vector_store_type == "chroma":
-                self.chroma_client.delete_collection(name=collection_name)
-                print(f"🗑️  Deleted Chroma collection '{collection_name}'")
-                return True
+                # Check if collection exists before deleting
+                try:
+                    # Try to get the collection to check if it exists
+                    self.chroma_client.get_collection(name=collection_name)
+                    # If we get here, collection exists, so delete it
+                    self.chroma_client.delete_collection(name=collection_name)
+                    print(f"🗑️  Deleted Chroma collection '{collection_name}'")
+                    return True
+                except Exception as get_error:
+                    # Collection doesn't exist
+                    print(f"ℹ️  Chroma collection '{collection_name}' not found (may have been already deleted)")
+                    return True  # Return True since the goal is achieved (collection doesn't exist)
             else:
                 return False
         except Exception as e:
             print(f"⚠️  Warning: Could not delete {self.vector_store_type} collection '{collection_name}': {e}")
             return False
     
-    def _load_state(self) -> Dict[str, Any]:
-        """Load the state from file."""
+    def _load_global_state(self) -> Dict[str, Any]:
+        """Load the global state from file (contains all collections)."""
         if self.state_file.exists():
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception as e:
-                print(f"⚠️  Warning: Could not load state: {e}")
+                print(f"⚠️  Warning: Could not load global state: {e}")
         return {
-            "documents": {},
-            "last_updated": None,
-            "total_pages": 0,
-            "indexed_pages": 0,
-            "failed_pages": 0,
-            "index_created": False,
-            "vector_store_type": None  # Track which vector store was used
+            "collections": {},
+            "last_updated": None
         }
     
+    def _get_collection_state(self) -> Dict[str, Any]:
+        """Get state for the current collection from global state."""
+        if "collections" not in self.global_state:
+            self.global_state["collections"] = {}
+        
+        if self.collection not in self.global_state["collections"]:
+            # Initialize collection state
+            self.global_state["collections"][self.collection] = {
+                "documents": {},
+                "last_updated": None,
+                "total_pages": 0,
+                "indexed_pages": 0,
+                "failed_pages": 0,
+                "index_created": False,
+                "vector_store_type": self.vector_store_type
+            }
+        
+        return self.global_state["collections"][self.collection]
+    
     def _save_state(self) -> None:
-        """Save the state to file."""
+        """Save the global state to file (updates current collection's state)."""
+        # Update collection state in global state
         self.state["last_updated"] = dt.now().isoformat()
+        self.global_state["collections"][self.collection] = self.state
+        self.global_state["last_updated"] = dt.now().isoformat()
+        
         try:
             with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(self.state, f, indent=2, ensure_ascii=False)
+                json.dump(self.global_state, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"❌ Error saving state: {e}")
+            print(f"❌ Error saving global state: {e}")
     
     def _scan_documents(self) -> Dict[str, Dict[str, Any]]:
         """Scan the documents directory for files."""
@@ -1127,6 +1178,175 @@ class RAGDocumentStore(DocumentStore):
         )
         return doc, page_count
     
+    def _ensure_qdrant_collection(self, collection_name: str) -> bool:
+        """
+        Ensure Qdrant collection exists with optimized parameters.
+        
+        Args:
+            collection_name: Name of the collection
+            
+        Returns:
+            True if collection exists or was created successfully
+        """
+        if not QDRANT_CLIENT_AVAILABLE:
+            raise ImportError("Qdrant client not available")
+        
+        try:
+            collections = self.qdrant_client.get_collections().collections
+            collection_exists = any(col.name == collection_name for col in collections)
+            
+            if not collection_exists:
+                # Get embedding dimension
+                embedding_dim = _get_embedding_dimension(self.embedding_model)
+                
+                # Build HNSW config
+                hnsw_config = HnswConfigDiff(
+                    m=QDRANT_HNSW_M,
+                    ef_construct=QDRANT_HNSW_EF_CONSTRUCT,
+                    full_scan_threshold=QDRANT_HNSW_FULL_SCAN_THRESHOLD,
+                    on_disk=QDRANT_ON_DISK,
+                )
+                
+                # Build optimizer config
+                optimizer_config = OptimizersConfigDiff(
+                    deleted_threshold=QDRANT_DELETED_THRESHOLD,
+                    vacuum_min_vector_number=QDRANT_VACUUM_MIN_VECTOR_NUMBER,
+                    default_segment_number=QDRANT_DEFAULT_SEGMENT_NUMBER,
+                    max_segment_size=QDRANT_MAX_SEGMENT_SIZE,
+                    memmap_threshold=QDRANT_MEMMAP_THRESHOLD,
+                    indexing_threshold=QDRANT_INDEXING_THRESHOLD,
+                    flush_interval_sec=QDRANT_FLUSH_INTERVAL_SEC,
+                )
+                
+                # Create collection
+                self.qdrant_client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(
+                        size=embedding_dim,
+                        distance=Distance.COSINE,
+                        on_disk=QDRANT_ON_DISK,
+                    ),
+                    hnsw_config=hnsw_config,
+                    optimizers_config=optimizer_config,
+                    on_disk_payload=QDRANT_ON_DISK_PAYLOAD,
+                )
+                print(f"   Created Qdrant collection '{collection_name}' with optimized parameters")
+            
+            return True
+        except Exception as e:
+            print(f"   ❌ Error ensuring Qdrant collection: {e}")
+            return False
+    
+    async def _index_nodes_to_qdrant_direct(self, nodes: List[Any], collection_name: str) -> bool:
+        """
+        Index nodes directly to Qdrant using native SDK (consistent with retrieval).
+        
+        Args:
+            nodes: List of LlamaIndex nodes to index
+            collection_name: Name of the Qdrant collection
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not QDRANT_CLIENT_AVAILABLE or not PointStruct:
+            raise ImportError("Qdrant client not available")
+        
+        try:
+            # Ensure collection exists
+            if not self._ensure_qdrant_collection(collection_name):
+                return False
+            
+            # Extract text and metadata from nodes
+            texts = []
+            metadata_list = []
+            for node in nodes:
+                texts.append(node.text)
+                # Extract metadata from node
+                node_metadata = {}
+                if hasattr(node, 'metadata') and node.metadata:
+                    node_metadata = dict(node.metadata)
+                # Add node_id if available
+                if hasattr(node, 'node_id'):
+                    node_metadata['node_id'] = node.node_id
+                metadata_list.append(node_metadata)
+            
+            # Generate embeddings if nodes don't have them
+            # Check if first node has embedding
+            has_embeddings = hasattr(nodes[0], 'embedding') and nodes[0].embedding is not None
+            
+            if not has_embeddings:
+                # Generate embeddings using OpenAI
+                print(f"   Generating embeddings for {len(texts)} chunks...")
+                embeddings = await self._generate_embeddings_batch(texts)
+            else:
+                # Extract embeddings from nodes
+                embeddings = [node.embedding for node in nodes]
+            
+            # Prepare points for insertion
+            import hashlib
+            points = []
+            for idx, (text, embedding, metadata) in enumerate(zip(texts, embeddings, metadata_list)):
+                # Generate unique ID based on content hash and index
+                content_hash = hashlib.md5(text.encode()).hexdigest()[:8]
+                unique_id = int(hashlib.md5(f"{metadata.get('file_path', '')}_{idx}_{content_hash}".encode()).hexdigest()[:16], 16)
+                
+                points.append(
+                    PointStruct(
+                        id=unique_id,
+                        vector=embedding,
+                        payload={
+                            "text": text,
+                            **metadata
+                        }
+                    )
+                )
+            
+            # Insert points in batches
+            batch_size = 100
+            for i in range(0, len(points), batch_size):
+                batch = points[i:i + batch_size]
+                self.qdrant_client.upsert(collection_name=collection_name, points=batch)
+            
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Error indexing nodes to Qdrant: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def _generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for a batch of texts.
+        
+        Args:
+            texts: List of text strings
+            
+        Returns:
+            List of embedding vectors
+        """
+        # Use OpenAI client to generate embeddings
+        # Handle batching to avoid rate limits
+        from config import EMBEDDING_BATCH_SIZE
+        
+        all_embeddings = []
+        batch_size = EMBEDDING_BATCH_SIZE
+        
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            try:
+                response = self.client.embeddings.create(
+                    model=self.embedding_model,
+                    input=batch
+                )
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+            except Exception as e:
+                print(f"   ⚠️  Error generating embeddings for batch {i//batch_size + 1}: {e}")
+                raise
+        
+        return all_embeddings
+    
     async def _process_single_document_async(self, doc_path: Path, status: str) -> Tuple[bool, int, int, Optional[str], float, float]:
         """
         Process a single document asynchronously: parse → chunk → embed → insert.
@@ -1349,35 +1569,48 @@ class RAGDocumentStore(DocumentStore):
             if not nodes:
                 return False, page_count, 0, "No nodes created from document", parsing_time, 0.0
             
-            # Insert nodes into index immediately (per-document insertion)
+            # Insert nodes into vector store using direct SDK (consistent with retrieval)
             # Track embedding time
             embedding_start = time.time()
-            create_new = not self.index
+            collection_name = f"{self.collection}_vectors"
             
             try:
-                if create_new:
-                    # Create index with first document
-                    collection_name = f"{self.collection}_vectors"
-                    vector_store = self._create_vector_store(collection_name)
-                    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-                    self.index = VectorStoreIndex(nodes=nodes, storage_context=storage_context)
-                    self.state["index_created"] = True
-                    # Store vector store type for tracking
-                    self.state["vector_store_type"] = self.vector_store_type
-                    self._save_state()
+                if self.vector_store_type == "qdrant":
+                    # Use direct Qdrant SDK for indexing (consistent with retrieval)
+                    success = await self._index_nodes_to_qdrant_direct(nodes, collection_name)
+                    if not success:
+                        raise Exception("Failed to index nodes to Qdrant")
+                    
+                    # Mark index as created in state
+                    if not self.state.get("index_created", False):
+                        self.state["index_created"] = True
+                        self.state["vector_store_type"] = self.vector_store_type
+                        self._save_state()
                 else:
-                    # Insert into existing index
-                    self.index.insert_nodes(nodes)
+                    # For ChromaDB, still use LlamaIndex wrapper (for now)
+                    create_new = not self.index
+                    if create_new:
+                        vector_store = self._create_vector_store(collection_name)
+                        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                        self.index = VectorStoreIndex(nodes=nodes, storage_context=storage_context)
+                        self.state["index_created"] = True
+                        self.state["vector_store_type"] = self.vector_store_type
+                        self._save_state()
+                    else:
+                        self.index.insert_nodes(nodes)
             except Exception as index_error:
-                # If index creation failed (e.g., race condition), try inserting instead
-                if create_new:
-                    # Another document may have created the index, try inserting
+                # If index creation failed (e.g., race condition), try again
+                if self.vector_store_type == "qdrant":
+                    # For Qdrant, try once more
+                    success = await self._index_nodes_to_qdrant_direct(nodes, collection_name)
+                    if not success:
+                        raise
+                else:
+                    # For ChromaDB, try inserting if index exists
                     if self.index:
                         self.index.insert_nodes(nodes)
                     else:
                         raise
-                else:
-                    raise
             
             embedding_time = time.time() - embedding_start
             
@@ -1715,7 +1948,7 @@ class RAGDocumentStore(DocumentStore):
             return None
     
     def delete_documents(self) -> bool:
-        """Delete the entire collection (remove storage directory)."""
+        """Delete the entire collection (remove storage directory and update global state)."""
         try:
             import shutil
             
@@ -1723,17 +1956,34 @@ class RAGDocumentStore(DocumentStore):
             collection_name = f"{self.collection}_vectors"
             self._delete_collection(collection_name)
             
-            # Remove storage directory
-            if self.storage_dir.exists():
-                shutil.rmtree(self.storage_dir)
-                print(f"🗑️  Deleted collection '{self.collection}'")
-            else:
-                print(f"ℹ️  Collection '{self.collection}' not found")
+            # Remove collection from global state
+            if "collections" in self.global_state and self.collection in self.global_state["collections"]:
+                del self.global_state["collections"][self.collection]
+                self.global_state["last_updated"] = dt.now().isoformat()
+                # Save updated global state
+                try:
+                    with open(self.state_file, 'w', encoding='utf-8') as f:
+                        json.dump(self.global_state, f, indent=2, ensure_ascii=False)
+                    print(f"🗑️  Removed collection '{self.collection}' from global state")
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not update global state: {e}")
             
+            # Remove storage directory (for ChromaDB only, Qdrant has no local storage)
+            if self.storage_dir and self.storage_dir.exists():
+                shutil.rmtree(self.storage_dir)
+                print(f"🗑️  Deleted collection storage directory: {self.storage_dir}")
+            elif self.storage_dir is None:
+                print(f"ℹ️  No local storage directory for Qdrant (service-based)")
+            else:
+                print(f"ℹ️  Collection storage directory '{self.collection}' not found")
+            
+            print(f"✅ Deleted collection '{self.collection}'")
             return True
             
         except Exception as e:
             print(f"❌ Error deleting collection: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def get_info(self) -> Optional[Dict[str, Any]]:
@@ -1745,7 +1995,8 @@ class RAGDocumentStore(DocumentStore):
             "total_documents": total_documents,
             "total_pages": self.state.get("total_pages", 0),
             "last_updated": self.state.get("last_updated"),
-            "storage_dir": str(self.storage_dir),
+            "storage_dir": str(self.storage_dir) if self.storage_dir else None,
+            "vector_store_type": self.vector_store_type,
             "collection": self.collection,
             "backend": "rag",
             "embedding_model": self.embedding_model,
@@ -1760,36 +2011,28 @@ class RAGDocumentStore(DocumentStore):
     
     @classmethod
     def list_all_collections(cls, storage_dir: str = None) -> List[str]:
-        """List all collections in the RAG storage directory (class method)."""
-        # Support both new vector_stores and legacy chroma_stores directories
-        if storage_dir is None:
-            vector_stores_path = Path(DEFAULT_STORAGE_DIR)
-            chroma_stores_path = Path("data/rag/chroma_stores")  # Legacy path
-        else:
-            vector_stores_path = Path(storage_dir)
-            chroma_stores_path = Path(storage_dir.replace("vector_stores", "chroma_stores"))
-        
+        """List all collections from global state files (class method)."""
         collections = set()
         
-        # Check new vector_stores directory
-        if vector_stores_path.exists():
+        # Read from ChromaDB global state file
+        chroma_state_file = Path(RAG_CHROMA_STATE_FILE)
+        if chroma_state_file.exists():
             try:
-                for item in vector_stores_path.iterdir():
-                    if item.is_dir():
-                        state_file = item / "rag_state.json"
-                        if state_file.exists():
-                            collections.add(item.name)
+                with open(chroma_state_file, 'r', encoding='utf-8') as f:
+                    chroma_state = json.load(f)
+                    if "collections" in chroma_state:
+                        collections.update(chroma_state["collections"].keys())
             except Exception:
                 pass
         
-        # Check legacy chroma_stores directory for backward compatibility
-        if chroma_stores_path.exists() and chroma_stores_path != vector_stores_path:
+        # Read from Qdrant global state file
+        qdrant_state_file = Path(RAG_QDRANT_STATE_FILE)
+        if qdrant_state_file.exists():
             try:
-                for item in chroma_stores_path.iterdir():
-                    if item.is_dir():
-                        state_file = item / "rag_state.json"
-                        if state_file.exists():
-                            collections.add(item.name)
+                with open(qdrant_state_file, 'r', encoding='utf-8') as f:
+                    qdrant_state = json.load(f)
+                    if "collections" in qdrant_state:
+                        collections.update(qdrant_state["collections"].keys())
             except Exception:
                 pass
         

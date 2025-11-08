@@ -37,8 +37,6 @@ class Config:
     
     # Rate Limiting Configuration
     EMBEDDING_BATCH_SIZE: int = 50  # Chunks per embedding API call (reduce if hitting rate limits)
-    EMBEDDING_DELAY_SECONDS: float = 1  # Delay between embedding batches (increase if hitting rate limits)
-    MAX_NODES_PER_BATCH: int = 40  # Max nodes to process before waiting (helps with rate limits)
     
     # Tavily Web Search Configuration
     DEFAULT_TAVILY_MAX_RESULTS: int = 5
@@ -53,9 +51,9 @@ class Config:
     LLAMA_PARSE_VERBOSE: bool = False
     LLAMA_PARSE_LANGUAGE: str = "en"  # Languages for OCR (English, French, Dutch)
     LLAMA_PARSE_PARSE_MODE: Optional[str] = None #"parse_page_with_llm" # Use this mode for better parsing, but not with multimodal model
-    LLAMA_PARSE_INVALIDATE_CACHE: bool = True  # Force re-parsing of cached documents (set to True to refresh)
-    LLAMA_PARSE_DO_NOT_CACHE: bool = True  # Don't cache parsing results (TEMPORARY FOR DEBUGGING)
-    LLAMA_PARSE_NUM_WORKERS: int = 19  # Number of workers for parallel processing
+    LLAMA_PARSE_INVALIDATE_CACHE: bool = False  # Force re-parsing of cached documents (set to True to refresh)
+    LLAMA_PARSE_DO_NOT_CACHE: bool = False  # Don't cache parsing results (TEMPORARY FOR DEBUGGING)
+    LLAMA_PARSE_NUM_WORKERS: int = 4  # Number of workers for parallel processing
     # Advanced parsing options -> disabled if without_llm 
     LLAMA_PARSE_SKIP_DIAGONAL_TEXT: bool = False
     LLAMA_PARSE_SPREADSHEET_EXTRACT_SUB_TABLES: bool = False  # Extract sub-tables from spreadsheets
@@ -72,30 +70,40 @@ class Config:
     LLAMA_PARSE_AZURE_OPENAI_ENDPOINT: Optional[str] = "https://luc-openai-sw.openai.azure.com/openai/deployments/gpt-5-mini/chat/completions?api-version=2025-01-01-preview"  # Azure OpenAI endpoint URL
     LLAMA_PARSE_AZURE_OPENAI_API_VERSION: Optional[str] = "2025-01-01-preview"  # Azure OpenAI API version (e.g., "2024-02-15-preview")
     
-    # Vector Store Configuration
+    # RAG Directory Structure Configuration
+    RAG_BASE_DIR: str = "data/rag"  # Base directory for RAG storage
+    RAG_MARKDOWNS_DIR: str = "data/rag/markdowns"  # Directory for markdown files
+    RAG_CHROMA_DIR: str = "data/rag/chroma"  # Directory for ChromaDB storage
+    RAG_QDRANT_DIR: str = "data/rag/qdrant"  # Directory for Qdrant state files
+    RAG_OPENAI_DIR: str = "data/rag/openai"  # Directory for OpenAI state files
+    RAG_CHROMA_STORAGE_DIR: str = "data/rag/chroma"  # Storage directory for ChromaDB (per-collection subdirectories)
+    RAG_CHROMA_STATE_FILE: str = "data/rag/chroma/rag_state.json"  # Global state file for ChromaDB
+    RAG_QDRANT_STATE_FILE: str = "data/rag/qdrant/rag_state.json"  # Global state file for Qdrant
+    RAG_OPENAI_STATE_FILE: str = "data/rag/openai/rag_state.json"  # Global state file for OpenAI
+    
+    # Qdrant Vector Store Configuration
     USE_QDRANT: bool = True  # Use Qdrant as default vector store (False = use Chroma)
     QDRANT_HOST: str = "localhost"  # Qdrant server host
     QDRANT_PORT: int = 6333  # Qdrant HTTP API port
     QDRANT_API_KEY: Optional[str] = None  # Optional API key for Qdrant Cloud
     
-    # Qdrant Optimization Parameters
-    # HNSW Index Parameters (for approximate nearest neighbor search)
+    # Qdrant HNSW Index Parameters (for approximate nearest neighbor search)
     QDRANT_HNSW_M: int = 16  # Number of bi-directional links per node (12-16 recommended, higher = better accuracy but more memory)
     QDRANT_HNSW_EF_CONSTRUCT: int = 200  # Size of candidate list during construction (100-200, higher = better quality but slower indexing)
     QDRANT_HNSW_EF: Optional[int] = None  # Size of candidate list during search (None = use default, higher = better accuracy but slower queries)
     # Note: QDRANT_HNSW_EF is a query-time parameter, not collection-time. Currently not used as LlamaIndex handles queries.
     QDRANT_HNSW_FULL_SCAN_THRESHOLD: int = 10000  # Use full scan if collection is smaller than this
     
-    # Memory and Storage
+    # Qdrant Memory and Storage Configuration
     QDRANT_ON_DISK: bool = False  # Store vectors on disk (False = faster but uses more RAM, True = less RAM but slower)
     QDRANT_ON_DISK_PAYLOAD: bool = True  # Store payload on disk (True recommended for large payloads)
     
-    # Segment Configuration (for parallel processing)
+    # Qdrant Segment Configuration (for parallel processing)
     QDRANT_DEFAULT_SEGMENT_NUMBER: Optional[int] = None  # Number of segments (None = auto, set to CPU cores for optimal parallelism)
     QDRANT_MAX_SEGMENT_SIZE: Optional[int] = None  # Max segment size in KB (None = auto)
     QDRANT_MEMMAP_THRESHOLD: Optional[int] = None  # Max vectors to store in-memory per segment (None = auto)
     
-    # Optimizer Configuration
+    # Qdrant Optimizer Configuration
     QDRANT_DELETED_THRESHOLD: float = 0.2  # Fraction of deleted vectors to trigger vacuum (0.2 = 20%)
     QDRANT_VACUUM_MIN_VECTOR_NUMBER: int = 1000  # Minimum vectors in segment to perform vacuum
     QDRANT_INDEXING_THRESHOLD: int = 10000  # Minimum vectors before creating index
@@ -106,13 +114,13 @@ class Config:
     CRAWL4AI_HEADLESS: bool = True  # Run browser in headless mode
     CRAWL4AI_PAGE_TIMEOUT: int = 30000  # Page load timeout in milliseconds
     CRAWL4AI_WAIT_UNTIL: str = "networkidle"  # Wait condition: "networkidle", "load", "domcontentloaded"
-    CRAWL4AI_MAX_DEPTH: int = 4  # Maximum crawl depth for website crawling
+    CRAWL4AI_MAX_DEPTH: int = 2  # Maximum crawl depth for website crawling
     CRAWL4AI_MAX_PAGES: int = 50  # Maximum number of pages to crawl
     CRAWL4AI_WORD_COUNT_THRESHOLD: int = 200  # Minimum word count to consider a page
     CRAWL4AI_VERBOSE: bool = False  # Enable verbose logging
     
     # Processing Configuration
-    DOCUMENT_BATCH_SIZE: int = 19  # Number of documents to process concurrently in each batch
+    DOCUMENT_BATCH_SIZE: int = 20  # Number of documents to process concurrently in each batch
     
     # Similarity and Deduplication
     DEFAULT_SIMILARITY_THRESHOLD: float = 0.8
@@ -375,8 +383,6 @@ DEFAULT_REASONING_EFFORT_HIGH = config.DEFAULT_REASONING_EFFORT_HIGH
 DEFAULT_TEXT_VERBOSITY_HIGH = config.DEFAULT_TEXT_VERBOSITY_HIGH
 DEFAULT_EMBEDDING_MODEL = config.DEFAULT_EMBEDDING_MODEL
 EMBEDDING_BATCH_SIZE = config.EMBEDDING_BATCH_SIZE
-EMBEDDING_DELAY_SECONDS = config.EMBEDDING_DELAY_SECONDS
-MAX_NODES_PER_BATCH = config.MAX_NODES_PER_BATCH
 DEFAULT_SIMILARITY_THRESHOLD = config.DEFAULT_SIMILARITY_THRESHOLD
 DOCUMENT_BATCH_SIZE = config.DOCUMENT_BATCH_SIZE
 DEFAULT_CHUNK_SIZE = config.DEFAULT_CHUNK_SIZE
@@ -445,3 +451,14 @@ CRAWL4AI_MAX_DEPTH = config.CRAWL4AI_MAX_DEPTH
 CRAWL4AI_MAX_PAGES = config.CRAWL4AI_MAX_PAGES
 CRAWL4AI_WORD_COUNT_THRESHOLD = config.CRAWL4AI_WORD_COUNT_THRESHOLD
 CRAWL4AI_VERBOSE = config.CRAWL4AI_VERBOSE
+
+# RAG directory structure configuration exports
+RAG_BASE_DIR = config.RAG_BASE_DIR
+RAG_MARKDOWNS_DIR = config.RAG_MARKDOWNS_DIR
+RAG_CHROMA_DIR = config.RAG_CHROMA_DIR
+RAG_QDRANT_DIR = config.RAG_QDRANT_DIR
+RAG_OPENAI_DIR = config.RAG_OPENAI_DIR
+RAG_CHROMA_STORAGE_DIR = config.RAG_CHROMA_STORAGE_DIR
+RAG_CHROMA_STATE_FILE = config.RAG_CHROMA_STATE_FILE
+RAG_QDRANT_STATE_FILE = config.RAG_QDRANT_STATE_FILE
+RAG_OPENAI_STATE_FILE = config.RAG_OPENAI_STATE_FILE

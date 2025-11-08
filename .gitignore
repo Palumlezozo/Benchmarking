@@ -52,11 +52,11 @@ data/documents/**/*
 !data/documents/**/.gitkeep
 
 # RAG data (but keep directory structure with .gitkeep)
-data/rag/chroma_stores/**/*
-data/rag/qdrant/**/*
-data/rag/markdowns/**/*
-data/rag/vector_stores/**/*  # State files in subdirectories
-data/rag/*.json
+data/rag/chroma/**/*  # ChromaDB vector stores and state files
+data/rag/qdrant/**/*  # Qdrant vector store data and state files
+data/rag/openai/**/*  # OpenAI backend state files
+data/rag/markdowns/**/*  # Markdown outputs from LlamaParse
+data/rag/**/*.json  # All JSON files (state files, configs, etc.)
 !data/rag/**/.gitkeep
 
 # Exports
